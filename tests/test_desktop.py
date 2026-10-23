@@ -1,5 +1,6 @@
 import gc
 import os
+import threading
 import time
 import tkinter as tk
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from unittest.mock import patch
 from PIL import Image
 from desktop import CropDialog, DesktopApp
 from server import ServiceError
+from windows_capture import CaptureError, Window
 
 
 @unittest.skipUnless(os.environ.get('DISPLAY') or os.name == 'nt', 'requires a desktop display')
@@ -53,9 +55,13 @@ class DesktopTests(unittest.TestCase):
 
     def test_generate_edit_copy_and_clear_real_widgets(self):
         self.root.geometry('870x680'); self.root.update()
+        self.assertGreaterEqual(self.app.input_canvas.winfo_width(), 350, 'input pane too narrow for capture controls')
         for widget in (self.app.confirm_box, self.app.generate_button):
-            bottom = widget.winfo_rooty() - self.root.winfo_rooty() + widget.winfo_height()
-            self.assertLessEqual(bottom, self.root.winfo_height(), 'action clipped on smaller desktop')
+            ancestor = widget.master
+            while ancestor is not None:
+                bottom = widget.winfo_rooty() - ancestor.winfo_rooty() + widget.winfo_height()
+                self.assertLessEqual(bottom, ancestor.winfo_height(), 'action clipped on smaller desktop')
+                ancestor = getattr(ancestor, 'master', None)
         self.app.context.insert('1.0', '对方：周末见吗？')
         self.app.key.set('test-only-key'); self.app.consent.set(True)
         replies = [{'label': '自然', 'text': f'回复 {i}'} for i in range(3)]
@@ -91,3 +97,64 @@ class DesktopTests(unittest.TestCase):
             generate.assert_not_called()
         self.app.remove_image()
         self.assertIsNone(self.app.screenshot)
+
+    def select_window(self):
+        self.app.windows = [Window(123, 456, '微信')]
+        self.app.window_box.configure(values=['微信'])
+        self.app.window_box.current(0)
+
+    def test_capture_requires_selection_with_visible_popup(self):
+        with patch('desktop.messagebox.showwarning') as warning, patch('desktop.capture_window_isolated') as capture:
+            self.app.capture_button.invoke()
+            warning.assert_called_once()
+            self.assertIn('查找微信', warning.call_args.args[1])
+            capture.assert_not_called()
+        self.assertFalse(self.app.busy)
+
+    def test_blank_window_capture_shows_fallback_and_restores_controls(self):
+        self.select_window()
+        with patch('desktop.capture_window_isolated', side_effect=CaptureError('未能采集到窗口内容。请按 Win+Shift+S 截图。')), patch('desktop.messagebox.showwarning') as warning, patch('desktop.CropDialog') as crop, patch('desktop.generate') as generate:
+            self.app.capture_button.invoke()
+            self.assertIn('正在采集', self.app.capture_button.cget('text'))
+            self.wait_for_job()
+            self.assertIn('Win+Shift+S', warning.call_args.args[1])
+            self.assertIn('未能采集', self.app.status.get())
+            self.assertEqual(self.app.capture_button.cget('text'), '采集选中窗口')
+            crop.assert_not_called(); generate.assert_not_called()
+        self.assertIsNone(self.app.screenshot)
+
+    def test_capture_does_not_block_ui_and_opens_crop_after_completion(self):
+        self.select_window()
+        gate, pulses = threading.Event(), []
+        image = Image.new('RGB', (300, 200), 'white')
+        def delayed_capture(window):
+            gate.wait(2)
+            return image
+        with patch('desktop.capture_window_isolated', side_effect=delayed_capture), patch('desktop.CropDialog') as crop:
+            self.app.capture_button.invoke()
+            self.root.after(0, lambda: pulses.append('responsive'))
+            self.root.update()
+            self.assertEqual(pulses, ['responsive'])
+            self.assertTrue(self.app.busy)
+            gate.set(); self.wait_for_job()
+            crop.assert_called_once()
+            self.assertIs(crop.call_args.args[1], image)
+        self.assertIsNone(self.app.screenshot, 'capture must wait for explicit crop acceptance')
+
+    def test_preview_creation_failure_is_visible(self):
+        with patch('desktop.CropDialog', side_effect=tk.TclError('preview failed')), patch('desktop.messagebox.showwarning') as warning:
+            self.app.show_crop(Image.new('RGB', (300, 200)))
+            self.assertIn('预览窗口未能打开', warning.call_args.args[1])
+
+    def test_system_screenshot_gives_import_steps_and_does_not_auto_import(self):
+        with patch('desktop.launch_snipping_tool') as launch, patch.object(self.root, 'iconify') as minimize, patch('desktop.ImageGrab.grabclipboard') as clipboard:
+            self.app.screen_button.invoke()
+            launch.assert_called_once(); minimize.assert_called_once()
+            clipboard.assert_not_called()
+        self.assertIn('导入剪贴板截图', self.app.capture_status.get())
+
+    def test_failed_system_screenshot_restores_assistant(self):
+        with patch('desktop.launch_snipping_tool', side_effect=CaptureError('请手动按 Win+Shift+S')), patch.object(self.root, 'iconify'), patch.object(self.root, 'deiconify') as restore, patch('desktop.messagebox.showwarning') as warning:
+            self.app.screen_button.invoke()
+            restore.assert_called_once()
+            self.assertIn('Win+Shift+S', warning.call_args.args[1])

@@ -1,17 +1,27 @@
 """Native desktop UI. Run with the Windows launcher or `python desktop.py`."""
+import os
 import queue
 import sys
 import threading
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from PIL import Image, ImageGrab, ImageTk
 
 from server import Config, InputError, ServiceError, TONES, generate, make_messages
-from windows_capture import CaptureError, capture_window, crop_box, image_payload, list_windows
+from windows_capture import CaptureError, capture_window_isolated, crop_box, image_payload, list_windows
 
 FONT_FAMILY = "Microsoft YaHei UI" if sys.platform == "win32" else "Noto Sans CJK SC"
+
+
+def launch_snipping_tool():
+    if sys.platform != "win32":
+        raise CaptureError("系统截图按钮仅支持 Windows；也可复制聊天文字后导入。")
+    try:
+        os.startfile("ms-screenclip:")
+    except OSError:
+        raise CaptureError("无法打开系统截图工具。请手动按 Win+Shift+S 截取聊天，再点击“导入剪贴板截图”。") from None
 
 
 class CropDialog(tk.Toplevel):
@@ -38,6 +48,13 @@ class CropDialog(tk.Toplevel):
         ttk.Button(controls, text="取消", command=self.destroy).pack(side="right")
         self.use = ttk.Button(controls, text="确认使用选区", command=self.confirm, state="disabled")
         self.use.pack(side="right", padx=8)
+        self.attributes("-topmost", bool(parent.attributes("-topmost")))
+        self.update_idletasks()
+        x = max(0, (self.winfo_screenwidth() - self.winfo_reqwidth()) // 2)
+        y = max(0, (self.winfo_screenheight() - self.winfo_reqheight()) // 2)
+        self.geometry(f"+{x}+{y}")
+        self.lift()
+        self.focus_set()
         self.grab_set()
         self.bind("<Escape>", lambda event: self.destroy())
 
@@ -88,11 +105,13 @@ class DesktopApp:
         style.configure("Heading.TLabel", font=(FONT_FAMILY, 20, "bold"))
         self.config = Config.from_env()
         self.events, self.busy, self.poll_id = queue.Queue(), False, None
+        self.capture_events = queue.Queue()
         self.screenshot = None
         self.preview_photo = None
         self.windows = []
         self.status = tk.StringVar(value="先打开微信聊天，再选择窗口采集，或导入主动复制的文字。")
         self.window_choice = tk.StringVar()
+        self.capture_status = tk.StringVar(value="先查找微信并选择窗口；若截图空白，使用“系统截图（推荐）”。")
         self.key = tk.StringVar(value=self.config.key)
         self.base = tk.StringVar(value=self.config.base)
         self.model = tk.StringVar(value=self.config.model)
@@ -121,20 +140,54 @@ class DesktopApp:
         ttk.Label(heading, text="  微信桌面回复助手 · 你确认，再发送").pack(side="left", pady=8)
         ttk.Checkbutton(heading, text="窗口置顶", variable=self.topmost, command=lambda: self.root.attributes("-topmost", self.topmost.get())).pack(side="right")
         self.button(heading, "AI 设置", self.show_settings, side="right", padx=12)
-        split = ttk.Panedwindow(frame, orient="horizontal"); split.grid(row=1, column=0, sticky="nsew")
-        left, right = ttk.Frame(split, padding=(0, 0, 12, 0)), ttk.Frame(split, padding=(12, 0, 0, 0))
-        split.add(left, weight=1); split.add(right, weight=1)
+        split = tk.PanedWindow(frame, orient="horizontal", sashwidth=8, background="#f3f5ef", borderwidth=0)
+        split.grid(row=1, column=0, sticky="nsew")
+        self.root.after_idle(lambda: split.sash_place(0, split.winfo_width() // 2, 0))
+        left_panel, right = ttk.Frame(split, padding=(0, 0, 12, 0)), ttk.Frame(split, padding=(12, 0, 0, 0))
+        split.add(left_panel, minsize=390, stretch="always"); split.add(right, minsize=390, stretch="always")
+        self.input_canvas = tk.Canvas(left_panel, highlightthickness=0, background="#f3f5ef")
+        scroll = ttk.Scrollbar(left_panel, orient="vertical", command=self.input_canvas.yview)
+        scroll.pack(side="right", fill="y")
+        self.input_canvas.pack(side="left", fill="both", expand=True)
+        self.input_canvas.configure(yscrollcommand=scroll.set)
+        left = ttk.Frame(self.input_canvas)
+        input_window = self.input_canvas.create_window(0, 0, window=left, anchor="nw")
+        def resize_inputs(event=None):
+            self.input_canvas.itemconfigure(input_window, width=self.input_canvas.winfo_width(), height=max(left.winfo_reqheight(), self.input_canvas.winfo_height()))
+            self.input_canvas.configure(scrollregion=self.input_canvas.bbox("all"))
+        left.bind("<Configure>", resize_inputs)
+        self.input_canvas.bind("<Configure>", resize_inputs)
+        def scroll_inputs(event):
+            widget = event.widget
+            if isinstance(widget, (tk.Text, ttk.Combobox)):
+                return
+            while widget is not None:
+                if widget is left or widget is self.input_canvas:
+                    self.input_canvas.yview_scroll(-int(event.delta / 120), "units")
+                    return "break"
+                widget = getattr(widget, "master", None)
+        self.root.bind("<MouseWheel>", scroll_inputs, add="+")
         left.columnconfigure(0, weight=1); left.rowconfigure(3, weight=1, minsize=35)
         right.columnconfigure(0, weight=1)
-        ttk.Label(left, text="01  选择允许分析的上下文").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        source_heading = ttk.Frame(left); source_heading.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(source_heading, text="01  选择允许分析的上下文").pack(anchor="w")
+        ttk.Label(source_heading, textvariable=self.capture_status, wraplength=375, foreground="#365f45").pack(anchor="w", pady=(4, 0))
         source = ttk.Frame(left); source.grid(row=1, column=0, sticky="ew")
         self.window_box = ttk.Combobox(source, textvariable=self.window_choice, state="readonly")
         self.window_box.pack(side="left", fill="x", expand=True); self.controls.append((self.window_box, "readonly"))
+        self.window_box.bind("<<ComboboxSelected>>", lambda event: self.capture_status.set("已选择微信窗口。打开需要的会话，再点“采集选中窗口”。"))
         self.button(source, "查找微信", self.refresh_windows, side="right", padx=(6, 0))
         tools = ttk.Frame(left); tools.grid(row=2, column=0, sticky="ew", pady=6)
-        self.button(tools, "采集选中窗口", self.capture, side="left")
-        self.button(tools, "导入复制文字", self.import_text, side="left", padx=5)
-        self.button(tools, "导入剪贴板截图", self.import_image, side="left")
+        tools.columnconfigure(0, weight=1); tools.columnconfigure(1, weight=1)
+        self.capture_button = ttk.Button(tools, text="采集选中窗口", command=self.capture)
+        self.capture_button.grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 5))
+        self.screen_button = ttk.Button(tools, text="系统截图（推荐）", command=self.system_screenshot)
+        self.screen_button.grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=(0, 5))
+        for column, (text, command) in enumerate((("导入复制文字", self.import_text), ("导入剪贴板截图", self.import_image))):
+            button = ttk.Button(tools, text=text, command=command)
+            button.grid(row=1, column=column, sticky="ew", padx=(0, 4) if column == 0 else (4, 0))
+            self.controls.append((button, "normal"))
+        self.controls.extend(((self.capture_button, "normal"), (self.screen_button, "normal")))
         self.context = ScrolledText(left, wrap="word", height=9, font=(FONT_FAMILY, 10), relief="flat", padx=10, pady=10, undo=False)
         self.context.grid(row=3, column=0, sticky="nsew"); self.controls.append((self.context, "normal"))
         ttk.Label(left, text="文字中请标注“我 / 对方”；仅分析本次导入的内容。", foreground="#6b786d").grid(row=4, column=0, sticky="w", pady=5)
@@ -153,9 +206,11 @@ class DesktopApp:
         ttk.Label(options, text="对方是").pack(side="left")
         relation = ttk.Entry(options, textvariable=self.relationship, width=12)
         relation.pack(side="left", padx=6, fill="x", expand=True); self.controls.append((relation, "normal"))
-        self.confirm_box = ttk.Checkbutton(left, text="确认将本次文字和截图提交给 AI", variable=self.consent)
-        self.confirm_box.grid(row=9, column=0, sticky="w", pady=8); self.controls.append((self.confirm_box, "normal"))
-        actions = ttk.Frame(left); actions.grid(row=10, column=0, sticky="ew")
+        workflow_actions = ttk.Frame(frame)
+        workflow_actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self.confirm_box = ttk.Checkbutton(workflow_actions, text="确认将本次文字和截图提交给 AI", variable=self.consent)
+        self.confirm_box.pack(side="left"); self.controls.append((self.confirm_box, "normal"))
+        actions = ttk.Frame(workflow_actions); actions.pack(side="right")
         self.generate_button = self.button(actions, "生成 3 条回复  Ctrl+Enter", self.request_generation, side="left")
         self.button(actions, "清空本次内容", self.clear, side="right")
         ttk.Label(right, text="03  编辑、复制，再回微信发送").grid(row=0, column=0, sticky="w", pady=(0, 8))
@@ -169,8 +224,8 @@ class DesktopApp:
             text = ScrolledText(card, height=4, wrap="word", relief="flat", font=(FONT_FAMILY, 10), padx=6, pady=6)
             text.pack(fill="both", expand=True, pady=4)
             self.reply_labels.append(label); self.reply_texts.append(text)
-        ttk.Label(frame, textvariable=self.status, wraplength=800, foreground="#365f45").grid(row=2, column=0, sticky="ew", pady=(12, 0))
-        ttk.Label(frame, text="应用不保存聊天和密钥；AI 服务的数据政策另行适用。采集后先裁剪预览，不自动发送微信消息。", wraplength=800, foreground="#6b786d").grid(row=3, column=0, sticky="w", pady=(5, 0))
+        ttk.Label(frame, textvariable=self.status, wraplength=800, foreground="#365f45").grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        ttk.Label(frame, text="应用不保存聊天和密钥；AI 服务的数据政策另行适用。采集后先裁剪预览，不自动发送微信消息。", wraplength=800, foreground="#6b786d").grid(row=4, column=0, sticky="w", pady=(5, 0))
 
     def show_settings(self):
         if self.busy:
@@ -203,24 +258,61 @@ class DesktopApp:
             self.window_choice.set("")
             if self.windows:
                 self.window_box.current(0)
-                self.status.set("请选择需要分析的微信窗口，打开对应聊天，再点击采集。")
+                self.status.set("已找到微信窗口。打开需要的聊天，再点击“采集选中窗口”。")
+                self.capture_status.set(f"找到 {len(self.windows)} 个微信窗口；请选中要分析的窗口，再点击采集。")
             else:
-                self.status.set("未找到微信窗口。请启动微信并登录；也可先复制聊天文字导入。")
+                self.show_capture_error("未找到微信窗口。请打开并登录电脑版微信，再点击“查找微信”。也可直接使用“系统截图（推荐）”，无需选择窗口。")
         except CaptureError as error:
-            self.status.set(str(error))
+            self.show_capture_error(str(error))
+        except Exception:
+            self.show_capture_error("查找微信窗口失败。可先使用“系统截图（推荐）”截取聊天，或复制聊天文字后导入。")
+
+    def show_capture_error(self, message):
+        self.status.set(message)
+        self.capture_status.set("采集未完成，请查看弹窗说明。可点击“系统截图（推荐）”继续。")
+        messagebox.showwarning("未完成聊天采集", message, parent=self.root)
+
+    def system_screenshot(self):
+        if self.busy:
+            return
+        self.status.set("请框选微信聊天；截图后从任务栏回到助手，点击“导入剪贴板截图”。")
+        self.capture_status.set("系统截图完成后，回到助手点“导入剪贴板截图”，再在预览中确认选区。")
+        self.root.iconify()
+        try:
+            launch_snipping_tool()
+        except CaptureError as error:
+            self.root.deiconify()
+            self.show_capture_error(str(error))
+
+    def show_crop(self, image):
+        before = set(self.root.winfo_children())
+        try:
+            CropDialog(self.root, image, self.attach_image)
+        except Exception:
+            for widget in set(self.root.winfo_children()) - before:
+                if isinstance(widget, tk.Toplevel):
+                    widget.destroy()
+            self.show_capture_error("已取得截图，但预览窗口未能打开。请重启助手后重试，或先使用“导入复制文字”。")
 
     def capture(self):
         if self.busy:
             return
         index = self.window_box.current()
         if not 0 <= index < len(self.windows):
-            self.status.set("请先点击“查找微信”，明确选择允许采集的窗口。")
+            self.show_capture_error("请先点击“查找微信”，在下拉框里选中微信窗口，再点击“采集选中窗口”。也可直接使用“系统截图（推荐）”。")
             return
-        try:
-            image = capture_window(self.windows[index])
-            CropDialog(self.root, image, self.attach_image)
-        except CaptureError as error:
-            self.status.set(str(error))
+        window, events = self.windows[index], self.capture_events
+        self.set_busy(True, operation="capture")
+        self.status.set("正在采集选定窗口，最多等待 8 秒；成功后会打开聊天区域预览。")
+        self.capture_status.set("正在采集…最多等待 8 秒。若微信画面无法捕获，会提示改用系统截图。")
+        def work():
+            try:
+                events.put((True, capture_window_isolated(window)))
+            except CaptureError as error:
+                events.put((False, str(error)))
+            except Exception:
+                events.put((False, "微信窗口采集出现错误。请按 Win+Shift+S 截取聊天，再点击“导入剪贴板截图”。"))
+        threading.Thread(target=work, daemon=True).start()
 
     def import_text(self):
         if self.busy:
@@ -247,7 +339,7 @@ class DesktopApp:
             if not isinstance(image, Image.Image):
                 self.status.set("剪贴板没有截图。请用微信截图或 Win+Shift+S 截取需要的聊天区域。")
                 return
-            CropDialog(self.root, image.convert("RGB"), self.attach_image)
+            self.show_crop(image.convert("RGB"))
         except Exception:
             self.status.set("无法读取剪贴板截图，请尝试复制聊天文字。")
 
@@ -258,6 +350,7 @@ class DesktopApp:
         self.preview.configure(image=self.preview_photo, text="")
         self.consent.set(False)
         self.status.set("已附加你确认的聊天选区；只有点击生成后才会提交给 AI。")
+        self.capture_status.set("聊天选区已附加；不需要在左侧看到识别文字。填写回复意图，再确认生成即可。")
 
     def remove_image(self):
         if not self.busy:
@@ -265,11 +358,12 @@ class DesktopApp:
             self.preview.configure(image="", text="未附加截图（最多 1 张）")
             self.consent.set(False)
 
-    def set_busy(self, busy):
+    def set_busy(self, busy, operation="generate"):
         self.busy = busy
         for widget, normal in self.controls:
             widget.configure(state="disabled" if busy else normal)
-        self.generate_button.configure(text="正在生成，请稍候…" if busy else "生成 3 条回复  Ctrl+Enter")
+        self.generate_button.configure(text="正在生成，请稍候…" if busy and operation == "generate" else "生成 3 条回复  Ctrl+Enter")
+        self.capture_button.configure(text="正在采集，请稍候…" if busy and operation == "capture" else "采集选中窗口")
 
     def request_generation(self):
         if self.busy:
@@ -302,6 +396,17 @@ class DesktopApp:
         threading.Thread(target=work, daemon=True).start()
 
     def poll(self):
+        try:
+            success, value = self.capture_events.get_nowait()
+            self.set_busy(False)
+            if success:
+                self.status.set("已取得窗口画面。请在预览窗口拖动框选聊天内容，再点“确认使用选区”。")
+                self.capture_status.set("已打开预览。拖动框选消息区域，再点“确认使用选区”。")
+                self.show_crop(value)
+            else:
+                self.show_capture_error(value)
+        except queue.Empty:
+            pass
         try:
             success, value = self.events.get_nowait()
             self.set_busy(False)
