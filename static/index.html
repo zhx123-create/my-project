@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f5f5ef">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>接话 · 微信回复助手</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header><div class="brand">接话<span>YOUR REPLY, YOUR WAY</span></div><span class="tag">iPhone 版</span></header>
+    <section class="intro"><p class="eyebrow">想说的话，换个好表达</p><h1>下一句，<br>帮你想好了<span>。</span></h1><p>放入聊天上下文，说说你的想法。<br>找到自然、合适，也像你自己的回复。</p></section>
+    <div id="service-status" class="notice" role="status">正在检查 AI 服务…</div>
+    <form id="reply-form">
+      <section class="panel"><div class="section-heading"><h2><span>01</span> 聊到哪里了？</h2><button id="paste" type="button" class="text-button">粘贴文字</button></div>
+        <label class="sr-only" for="context">聊天上下文</label><textarea id="context" maxlength="20000" rows="6" placeholder="把最近几句聊天粘贴在这里，例如：&#10;对方：周末有空吗？一起吃饭？&#10;我：这周可能有点忙。&#10;对方：那下周呢？"></textarea>
+        <div class="context-footer"><label class="upload" for="images">＋ 添加聊天截图 <span>最多 3 张</span></label><input id="images" class="file-input" type="file" accept="image/*" multiple><span id="char-count">0 / 20000</span></div>
+        <div id="image-list" class="image-list"></div><p class="helper">文字请标明“我 / 对方”；截图请保留气泡位置，遮住不需要分享的信息。</p>
+      </section>
+      <section class="panel"><h2><span>02</span> 你想怎么说？</h2>
+        <label for="intent">表达意图</label><textarea id="intent" maxlength="1000" rows="2" placeholder="例如：想婉拒，但不想让对方觉得我很冷淡"></textarea>
+        <div class="quick-intents"><button type="button" data-intent="委婉拒绝，礼貌但不要留下模糊的承诺">委婉拒绝</button><button type="button" data-intent="自然接话，保持轻松，不要过于热情">自然接话</button><button type="button" data-intent="真诚表达关心，不过度亲密">表达关心</button><button type="button" data-intent="礼貌推进事情，明确下一步">推进事情</button></div>
+        <label for="relationship">对方是 <span class="optional">选填</span></label><input id="relationship" maxlength="100" placeholder="例如：朋友、同事、刚认识的人">
+        <label for="tone">回复语气</label><select id="tone"><option>自然</option><option>温柔</option><option>幽默</option><option>简洁</option><option>正式</option></select>
+      </section>
+      <p class="privacy">点击生成会将本次文字和截图发送给所配置的 AI 服务。应用不保存聊天记录；AI 服务的数据政策另行适用。</p>
+      <button id="generate" class="primary" type="submit">帮我想回复 <span>↗</span></button>
+      <p id="error" class="error" role="alert" hidden></p>
+    </form>
+    <section id="results" hidden aria-live="polite"><div class="section-heading"><h2>挑一句，换成你的语气</h2><button id="clear" type="button" class="text-button">清空本次内容</button></div><p class="helper">可以直接编辑，再复制回微信。发送前请确认符合你的意思。</p><div id="reply-list"></div><button id="again" type="button" class="secondary">再想一组</button></section>
+    <footer>你决定说什么，我们帮你表达。<br>Safari → 分享 → 添加到主屏幕，随时打开。</footer>
+  </main>
+</body>
+</html>
