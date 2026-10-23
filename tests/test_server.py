@@ -25,6 +25,24 @@ class PromptTests(unittest.TestCase):
                 with self.assertRaises(server.InputError):
                     server.make_messages(data)
 
+    def test_history_only_conversation_uses_background_and_current_goal(self):
+        messages = server.make_messages({"history": "对方：周五交稿？\n我：正在整理。", "background": "这是每周项目同步。", "conversation_name": "项目同事", "intent": "确认周五下午交付", "reply_count": 1, "include_analysis": True})
+        prompt = messages[0]['content']
+        data = json.loads(messages[1]['content'][0]['text'])
+        self.assertEqual(data['聊天上下文'], '')
+        self.assertIn('周五交稿', data['已记录的历史'])
+        self.assertEqual(data['用户填写的背景'], '这是每周项目同步。')
+        self.assertIn('1条', prompt)
+        self.assertIn('understanding', prompt)
+        self.assertIn('候选草稿', prompt)
+
+    def test_memory_and_generation_options_are_bounded(self):
+        invalid = [{'background': 'x' * 3001}, {'history': 'x' * 12001}, {'conversation_name': 'x' * 101}, {'reply_count': 2}, {'reply_count': True}, {'include_analysis': 'yes'}]
+        for extra in invalid:
+            with self.subTest(keys=list(extra)):
+                with self.assertRaises(server.InputError):
+                    server.make_messages({'context': '你好', **extra})
+
 
 class GenerationTests(unittest.TestCase):
     def setUp(self):
@@ -64,6 +82,31 @@ class GenerationTests(unittest.TestCase):
             with patch('server.urllib.request.OpenerDirector.open', return_value=io.BytesIO(json.dumps(payload).encode())):
                 with self.assertRaises(server.ServiceError):
                     server.generate(self.config, [])
+
+    def test_one_reply_with_understanding_and_bounded_output(self):
+        expected = {'understanding': '正在确认项目交付时间，具体时刻尚未确定。', 'replies': [{'label': '自然', 'text': '我会在周五下午发给你。'}]}
+        upstream = {'choices': [{'message': {'content': json.dumps(expected)}}]}
+        with patch('server.urllib.request.OpenerDirector.open', return_value=io.BytesIO(json.dumps(upstream).encode())) as opened:
+            result = server.generate(self.config, server.make_messages({'context': '周五能交吗？', 'reply_count': 1, 'include_analysis': True}), reply_count=1, include_analysis=True)
+        self.assertEqual(result, expected)
+        payload = json.loads(opened.call_args.args[0].data)
+        self.assertLessEqual(payload['max_tokens'], 400)
+
+    def test_one_reply_default_return_remains_a_list(self):
+        replies = [{'label': '自然', 'text': '好的，我们周五确认。'}]
+        upstream = {'choices': [{'message': {'content': json.dumps({'replies': replies})}}]}
+        with patch('server.urllib.request.OpenerDirector.open', return_value=io.BytesIO(json.dumps(upstream).encode())):
+            result = server.generate(self.config, [], reply_count=1)
+        self.assertEqual(result, replies)
+
+    def test_wrong_reply_count_or_missing_analysis_is_rejected(self):
+        cases = [{'replies': []}, {'replies': [{'label': '自然', 'text': '你好'}]}, {'understanding': '字' * 201, 'replies': [{'label': '自然', 'text': '你好'}]}]
+        for content in cases:
+            with self.subTest(content=str(content)[:40]):
+                upstream = {'choices': [{'message': {'content': json.dumps(content)}}]}
+                with patch('server.urllib.request.OpenerDirector.open', return_value=io.BytesIO(json.dumps(upstream).encode())):
+                    with self.assertRaises(server.ServiceError):
+                        server.generate(self.config, [], reply_count=1, include_analysis=True)
 
 
 class HTTPTests(unittest.TestCase):
@@ -111,6 +154,15 @@ class HTTPTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
                 self.assertEqual(json.load(response)['replies'], replies)
             self.assertIn('自然接话', generate.call_args.args[1][1]['content'][0]['text'])
+
+    def test_http_analysis_has_flat_result_and_preserves_history(self):
+        result = {'understanding': '双方正在确认见面时间。', 'replies': [{'label': '自然', 'text': '周六中午怎么样？'}]}
+        with patch('server.generate', return_value=result) as generate:
+            with self.request('/api/generate', {'history': '对方：周末见吗？', 'reply_count': 1, 'include_analysis': True}) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(json.load(response), result)
+            self.assertTrue(generate.call_args.kwargs['include_analysis'])
+            self.assertEqual(generate.call_args.kwargs['reply_count'], 1)
 
     def test_invalid_and_cross_origin_requests(self):
         for body, headers, expected in [({}, {}, 400), ({'context': 'hi'}, {'Origin': 'https://other.example'}, 403)]:

@@ -67,7 +67,14 @@ def ensure_venv(project, base_python=sys.executable, emit=print):
 
 def dependencies_ready(python):
     try:
-        result = subprocess.run([str(python), "-c", "import tkinter; from PIL import Image, ImageGrab, ImageTk, __version__; assert __version__ == '12.0.0'"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        check = (
+            "import sys, tkinter; from PIL import Image, ImageGrab, ImageTk, __version__; assert __version__ == '12.0.0'\n"
+            "if sys.platform == 'win32':\n"
+            " from importlib.metadata import version\n"
+            " assert version('uiautomation') == '2.0.29'\n"
+            " assert version('comtypes') == '1.4.17'\n"
+        )
+        result = subprocess.run([str(python), "-c", check], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -86,7 +93,7 @@ def prepare_desktop(project=ROOT, base_python=sys.executable, emit=print):
     except (OSError, subprocess.CalledProcessError):
         raise SetupError("依赖安装失败。请查看上方错误，确认能访问 pypi.org 和 files.pythonhosted.org 后重试。现有环境已保留，未反复重建。") from None
     if not dependencies_ready(python):
-        raise SetupError("依赖安装后仍缺少 Pillow 或 Tcl/Tk。请通过官方 Python 安装程序修复 Tcl/Tk 组件，再重试。")
+        raise SetupError("依赖检查未通过。请确认 Pillow、Windows 辅助功能依赖已安装，并通过官方 Python 安装程序修复缺少的 Tcl/Tk 组件。")
     return python
 
 

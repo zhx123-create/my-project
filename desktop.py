@@ -1,18 +1,31 @@
 """Native desktop UI. Run with the Windows launcher or `python desktop.py`."""
 import os
+from pathlib import Path
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from PIL import Image, ImageGrab, ImageTk
 
 from server import Config, InputError, ServiceError, TONES, generate, make_messages
+from conversation_memory import ConversationMemory
 from windows_capture import CaptureError, capture_window_isolated, crop_box, image_payload, list_windows
+from wechat_reader import read_conversation
 
 FONT_FAMILY = "Microsoft YaHei UI" if sys.platform == "win32" else "Noto Sans CJK SC"
+TEMP_CONVERSATION = "临时会话（不记忆）"
+
+
+def default_memory_path():
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return base / "JieHua" / "conversations.json"
 
 
 def launch_snipping_tool():
@@ -89,7 +102,7 @@ class CropDialog(tk.Toplevel):
 
 
 class DesktopApp:
-    def __init__(self, root):
+    def __init__(self, root, memory=None):
         self.root = root
         self.root.title("接话 · Windows 微信回复助手")
         height = max(680, min(850, self.root.winfo_screenheight() - 90))
@@ -106,12 +119,29 @@ class DesktopApp:
         self.config = Config.from_env()
         self.events, self.busy, self.poll_id = queue.Queue(), False, None
         self.capture_events = queue.Queue()
+        self.reader_events = queue.Queue()
+        self.active_operation = None
+        self.job_started = None
+        self.last_reader_text = None
+        self.active_profile = None
+        self.memory_warning = None
+        if memory is not None:
+            self.memory = memory
+        else:
+            try:
+                self.memory = ConversationMemory(default_memory_path())
+            except (ValueError, OSError):
+                self.memory = ConversationMemory()
+                self.memory_warning = "本地会话记忆未能读取。已使用临时记忆，原文件未改动。"
         self.screenshot = None
         self.preview_photo = None
         self.windows = []
-        self.status = tk.StringVar(value="先打开微信聊天，再选择窗口采集，或导入主动复制的文字。")
+        self.status = tk.StringVar(value="新建一个会话，填写背景和回复目的；查找微信后，可尝试一键读取文字并分析。")
         self.window_choice = tk.StringVar()
-        self.capture_status = tk.StringVar(value="先查找微信并选择窗口；若截图空白，使用“系统截图（推荐）”。")
+        self.capture_status = tk.StringVar(value="优先读取消息文字。请确认微信中打开的联系人，与下方记忆会话一致。")
+        self.conversation_name = tk.StringVar(value=TEMP_CONVERSATION)
+        self.reply_mode = tk.StringVar(value="先给 1 条（较快）")
+        self.memory_note = tk.StringVar()
         self.key = tk.StringVar(value=self.config.key)
         self.base = tk.StringVar(value=self.config.base)
         self.model = tk.StringVar(value=self.config.model)
@@ -122,6 +152,9 @@ class DesktopApp:
         self.controls = []
         self.settings_dialog = None
         self._build()
+        self.refresh_memory_options()
+        if self.memory_warning:
+            self.status.set(self.memory_warning)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Control-Return>", lambda event: self.request_generation())
         self.poll_id = self.root.after(80, self.poll)
@@ -172,6 +205,14 @@ class DesktopApp:
         source_heading = ttk.Frame(left); source_heading.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(source_heading, text="01  选择允许分析的上下文").pack(anchor="w")
         ttk.Label(source_heading, textvariable=self.capture_status, wraplength=375, foreground="#365f45").pack(anchor="w", pady=(4, 0))
+        memory_bar = ttk.Frame(source_heading); memory_bar.pack(fill="x", pady=(7, 0))
+        ttk.Label(memory_bar, text="记忆会话").pack(side="left", padx=(0, 5))
+        self.profile_box = ttk.Combobox(memory_bar, textvariable=self.conversation_name, width=13, state="readonly")
+        self.profile_box.pack(side="left", fill="x", expand=True)
+        self.profile_box.bind("<<ComboboxSelected>>", lambda event: self.select_profile(self.conversation_name.get()))
+        self.controls.append((self.profile_box, "readonly"))
+        self.button(memory_bar, "新建", self.new_profile, side="left", padx=4).configure(width=4)
+        self.button(memory_bar, "背景/记忆", self.show_memory, side="left").configure(width=9)
         source = ttk.Frame(left); source.grid(row=1, column=0, sticky="ew")
         self.window_box = ttk.Combobox(source, textvariable=self.window_choice, state="readonly")
         self.window_box.pack(side="left", fill="x", expand=True); self.controls.append((self.window_box, "readonly"))
@@ -179,18 +220,21 @@ class DesktopApp:
         self.button(source, "查找微信", self.refresh_windows, side="right", padx=(6, 0))
         tools = ttk.Frame(left); tools.grid(row=2, column=0, sticky="ew", pady=6)
         tools.columnconfigure(0, weight=1); tools.columnconfigure(1, weight=1)
+        self.analyze_button = ttk.Button(tools, text="读取当前会话文字并分析", command=self.analyze_current_chat)
+        self.analyze_button.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        self.controls.append((self.analyze_button, "normal"))
         self.capture_button = ttk.Button(tools, text="采集选中窗口", command=self.capture)
-        self.capture_button.grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 5))
-        self.screen_button = ttk.Button(tools, text="系统截图（推荐）", command=self.system_screenshot)
-        self.screen_button.grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=(0, 5))
+        self.capture_button.grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(0, 5))
+        self.screen_button = ttk.Button(tools, text="系统截图（备用）", command=self.system_screenshot)
+        self.screen_button.grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(0, 5))
         for column, (text, command) in enumerate((("导入复制文字", self.import_text), ("导入剪贴板截图", self.import_image))):
             button = ttk.Button(tools, text=text, command=command)
-            button.grid(row=1, column=column, sticky="ew", padx=(0, 4) if column == 0 else (4, 0))
+            button.grid(row=2, column=column, sticky="ew", padx=(0, 4) if column == 0 else (4, 0))
             self.controls.append((button, "normal"))
         self.controls.extend(((self.capture_button, "normal"), (self.screen_button, "normal")))
-        self.context = ScrolledText(left, wrap="word", height=9, font=(FONT_FAMILY, 10), relief="flat", padx=10, pady=10, undo=False)
+        self.context = ScrolledText(left, wrap="word", height=5, font=(FONT_FAMILY, 10), relief="flat", padx=10, pady=10, undo=False)
         self.context.grid(row=3, column=0, sticky="nsew"); self.controls.append((self.context, "normal"))
-        ttk.Label(left, text="文字中请标注“我 / 对方”；仅分析本次导入的内容。", foreground="#6b786d").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Label(left, text="本次消息；生成时会合并所选会话的已确认记忆。", foreground="#6b786d").grid(row=4, column=0, sticky="w", pady=5)
         preview_row = ttk.Frame(left); preview_row.grid(row=5, column=0, sticky="ew")
         self.preview = ttk.Label(preview_row, text="未附加截图（最多 1 张）")
         self.preview.pack(side="left")
@@ -206,26 +250,199 @@ class DesktopApp:
         ttk.Label(options, text="对方是").pack(side="left")
         relation = ttk.Entry(options, textvariable=self.relationship, width=12)
         relation.pack(side="left", padx=6, fill="x", expand=True); self.controls.append((relation, "normal"))
+        mode = ttk.Combobox(left, textvariable=self.reply_mode, values=["先给 1 条（较快）", "生成 3 条候选"], state="readonly")
+        mode.grid(row=9, column=0, sticky="ew", pady=(0, 5)); self.controls.append((mode, "readonly"))
         workflow_actions = ttk.Frame(frame)
         workflow_actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-        self.confirm_box = ttk.Checkbutton(workflow_actions, text="确认将本次文字和截图提交给 AI", variable=self.consent)
+        self.confirm_box = ttk.Checkbutton(workflow_actions, text="确认会话匹配并允许提交上下文给 AI", variable=self.consent)
         self.confirm_box.pack(side="left"); self.controls.append((self.confirm_box, "normal"))
         actions = ttk.Frame(workflow_actions); actions.pack(side="right")
-        self.generate_button = self.button(actions, "生成 3 条回复  Ctrl+Enter", self.request_generation, side="left")
+        self.generate_button = self.button(actions, "分析并生成  Ctrl+Enter", self.request_generation, side="left")
         self.button(actions, "清空本次内容", self.clear, side="right")
-        ttk.Label(right, text="03  编辑、复制，再回微信发送").grid(row=0, column=0, sticky="w", pady=(0, 8))
-        self.reply_texts, self.reply_labels = [], []
+        ttk.Label(right, text="03  AI 对上下文的理解（请核对）").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.understanding = ScrolledText(right, height=3, wrap="word", font=(FONT_FAMILY, 10), relief="flat", padx=8, pady=8)
+        self.understanding.grid(row=1, column=0, sticky="ew", pady=(0, 10)); self.understanding.configure(state="disabled")
+        self.reply_texts, self.reply_labels, self.reply_cards = [], [], []
+        self.results_panel = right
         for i in range(3):
             card = ttk.LabelFrame(right, text=f"候选 {i + 1}", padding=8)
-            right.rowconfigure(i + 1, weight=1, uniform="replies")
-            card.grid(row=i + 1, column=0, sticky="nsew", pady=(0, 8))
+            right.rowconfigure(i + 2, weight=1 if i == 0 else 0, uniform="replies" if i == 0 else "")
+            card.grid(row=i + 2, column=0, sticky="nsew", pady=(0, 8))
+            self.reply_cards.append(card)
+            if i:
+                card.grid_remove()
             label = ttk.Label(card, text="尚未生成"); label.pack(anchor="w")
-            self.button(card, "复制这条回复", lambda n=i: self.copy_reply(n), side="bottom", anchor="e")
+            reply_actions = ttk.Frame(card); reply_actions.pack(side="bottom", fill="x")
+            self.button(reply_actions, "复制回复", lambda n=i: self.copy_reply(n), side="right")
+            self.button(reply_actions, "记为已发送", lambda n=i: self.confirm_sent(n), side="left")
             text = ScrolledText(card, height=4, wrap="word", relief="flat", font=(FONT_FAMILY, 10), padx=6, pady=6)
             text.pack(fill="both", expand=True, pady=4)
             self.reply_labels.append(label); self.reply_texts.append(text)
         ttk.Label(frame, textvariable=self.status, wraplength=800, foreground="#365f45").grid(row=3, column=0, sticky="ew", pady=(12, 0))
-        ttk.Label(frame, text="应用不保存聊天和密钥；AI 服务的数据政策另行适用。采集后先裁剪预览，不自动发送微信消息。", wraplength=800, foreground="#6b786d").grid(row=4, column=0, sticky="w", pady=(5, 0))
+        ttk.Label(frame, textvariable=self.memory_note, wraplength=800, foreground="#6b786d").grid(row=4, column=0, sticky="w", pady=(5, 0))
+
+    def refresh_memory_options(self):
+        self.profile_box.configure(values=[TEMP_CONVERSATION, *self.memory.names()])
+        self.memory_note.set("已启用本地明文会话记忆，可在“背景/记忆”关闭并删除保存文件。密钥从不保存。" if self.memory.persistent else "会话记忆仅保留本次运行；可在“背景/记忆”开启本地保存。密钥从不保存。")
+
+    def save_profile_fields(self):
+        if self.active_profile:
+            self.memory.update_profile(self.active_profile, relationship=self.relationship.get(), goal=self.intent.get("1.0", "end-1c"))
+
+    def select_profile(self, name):
+        if self.busy:
+            return
+        try:
+            self.save_profile_fields()
+            profile = self.memory.profile(name) if name != TEMP_CONVERSATION else None
+        except (ValueError, OSError) as error:
+            self.conversation_name.set(self.active_profile or TEMP_CONVERSATION)
+            messagebox.showwarning("会话未切换", str(error), parent=self.root)
+            return
+        self.active_profile = profile["name"] if profile else None
+        self.conversation_name.set(self.active_profile or TEMP_CONVERSATION)
+        self.context.delete("1.0", "end")
+        self.last_reader_text = None
+        self.remove_image()
+        self.intent.delete("1.0", "end")
+        self.intent.insert("1.0", profile["goal"] if profile else "自然接话，简洁一点")
+        self.relationship.set(profile["relationship"] if profile else "")
+        self.clear_results()
+        self.refresh_memory_options()
+        self.status.set("已切换会话。请核对微信当前打开的联系人与此会话一致；程序不会自动核实联系人身份。")
+
+    def new_profile(self):
+        if self.busy:
+            return
+        name = simpledialog.askstring("新建会话记忆", "给这段会话起一个名称（例如：小林、项目群）。不同联系人请使用不同名称：", parent=self.root)
+        if name is None:
+            return
+        name = name.strip()
+        if name == TEMP_CONVERSATION:
+            messagebox.showwarning("名称不可用", "请使用其他会话名称。", parent=self.root)
+            return
+        self.select_profile(name)
+        if self.active_profile == name:
+            self.show_memory()
+
+    def show_memory(self):
+        if self.busy:
+            return
+        if not self.active_profile:
+            messagebox.showinfo("先选择会话", "点击“新建”为当前聊天命名，再填写关系、背景和沟通目标。", parent=self.root)
+            return
+        name = self.active_profile
+        profile = self.memory.profile(name)
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"会话背景与记忆 · {name}")
+        dialog.geometry("720x650"); dialog.transient(self.root)
+        panel = ttk.Frame(dialog, padding=15); panel.pack(fill="both", expand=True)
+        ttk.Label(panel, text="关系和背景由你确认，助手不会把猜测自动记成事实。", wraplength=650).pack(anchor="w")
+        ttk.Label(panel, text="与对方的关系").pack(anchor="w", pady=(10, 4))
+        relation = ttk.Entry(panel); relation.insert(0, self.relationship.get()); relation.pack(fill="x")
+        ttk.Label(panel, text="已确认的背景 / 重要事实（最多 3000 字）").pack(anchor="w", pady=(10, 4))
+        background = ScrolledText(panel, height=4, wrap="word", font=(FONT_FAMILY, 10))
+        background.insert("1.0", profile["background"]); background.pack(fill="x")
+        ttk.Label(panel, text="你的沟通目标（最多 1000 字）").pack(anchor="w", pady=(10, 4))
+        goal = ScrolledText(panel, height=2, wrap="word", font=(FONT_FAMILY, 10))
+        goal.insert("1.0", self.intent.get("1.0", "end-1c")); goal.pack(fill="x")
+        ttk.Label(panel, text="已记录的近期上下文（最多约 12000 字，不含未发送草稿）").pack(anchor="w", pady=(10, 4))
+        history = ScrolledText(panel, height=6, wrap="word", font=(FONT_FAMILY, 10))
+        history.insert("1.0", self.memory.history_text(name)); history.configure(state="disabled"); history.pack(fill="both", expand=True)
+        persist = tk.BooleanVar(dialog, value=self.memory.persistent)
+        ttk.Checkbutton(panel, text="允许把所有会话的文字记忆保存到本机（明文）；取消会删除已保存的记忆文件", variable=persist).pack(anchor="w", pady=8)
+        ttk.Label(panel, text=f"保存位置：{self.memory.path or '当前为临时记忆，未指定保存位置'}", wraplength=650).pack(anchor="w")
+        actions = ttk.Frame(panel); actions.pack(fill="x", pady=(10, 0))
+        def save():
+            try:
+                self.memory.update_profile(name, background=background.get("1.0", "end-1c"), relationship=relation.get(), goal=goal.get("1.0", "end-1c"))
+                self.memory.set_persistent(persist.get())
+            except (ValueError, OSError) as error:
+                messagebox.showwarning("记忆未保存", str(error), parent=dialog)
+                return
+            self.relationship.set(relation.get())
+            self.intent.delete("1.0", "end"); self.intent.insert("1.0", goal.get("1.0", "end-1c"))
+            self.consent.set(False); self.refresh_memory_options(); dialog.destroy()
+        def erase_history():
+            if not messagebox.askyesno("清空此会话历史", "将删除此会话已记录的聊天文字，保留关系和背景资料。是否继续？", parent=dialog):
+                return
+            try:
+                self.memory.clear_history(name)
+            except (ValueError, OSError) as error:
+                messagebox.showwarning("未能清空", str(error), parent=dialog); return
+            history.configure(state="normal"); history.delete("1.0", "end"); history.configure(state="disabled")
+            self.context.delete("1.0", "end"); self.consent.set(False)
+        def delete_profile():
+            if not messagebox.askyesno("删除会话", "将删除此会话的背景资料和全部历史。是否继续？", parent=dialog):
+                return
+            try:
+                self.memory.delete(name)
+            except (ValueError, OSError) as error:
+                messagebox.showwarning("未能删除", str(error), parent=dialog); return
+            self.active_profile = None
+            dialog.destroy(); self.select_profile(TEMP_CONVERSATION)
+        ttk.Button(actions, text="保存资料", command=save).pack(side="right")
+        ttk.Button(actions, text="清空历史", command=erase_history).pack(side="left")
+        ttk.Button(actions, text="删除会话", command=delete_profile).pack(side="left", padx=8)
+        dialog.grab_set(); dialog.lift()
+
+    def clear_results(self):
+        for text, label in zip(self.reply_texts, self.reply_labels):
+            text.delete("1.0", "end"); label.configure(text="尚未生成")
+        self.understanding.configure(state="normal"); self.understanding.delete("1.0", "end"); self.understanding.configure(state="disabled")
+
+    def display_reply_count(self, count):
+        for i, card in enumerate(self.reply_cards):
+            if i < count:
+                card.grid()
+            else:
+                card.grid_remove()
+            self.results_panel.rowconfigure(i + 2, weight=1 if i < count else 0, uniform="replies" if i < count else "")
+
+    def confirm_sent(self, index):
+        if self.busy:
+            return
+        if not self.active_profile:
+            messagebox.showinfo("先选择会话", "只有已命名的会话可以记录已发送内容。请先新建或选择记忆会话。", parent=self.root)
+            return
+        text = self.reply_texts[index].get("1.0", "end-1c").strip()
+        if not text:
+            return
+        if not messagebox.askyesno("确认已经发送", "仅在你确实已把这条内容发送到微信后记录。是否将它记入当前会话？这不会代你发送消息。", parent=self.root):
+            return
+        try:
+            self.memory.confirm_sent(self.active_profile, text)
+            self.status.set("已按你的确认记入当前会话。复制草稿本身不会记录为已发送。")
+        except (ValueError, OSError) as error:
+            messagebox.showwarning("未能记录", str(error), parent=self.root)
+
+    def analyze_current_chat(self):
+        if self.busy:
+            return
+        if not self.active_profile:
+            messagebox.showinfo("先建立会话记忆", "点击“新建”，为当前联系人建立独立会话并填写背景。请核对微信当前打开的会话，再勾选允许提交上下文。", parent=self.root)
+            return
+        if not self.consent.get():
+            self.status.set("请确认微信当前联系人与所选记忆会话匹配，并勾选允许读取、提交上下文。")
+            return
+        if not self.key.get().strip():
+            self.status.set("请先在“AI 设置”填写密钥，才能读取后直接生成。")
+            return
+        index = self.window_box.current()
+        if not 0 <= index < len(self.windows):
+            self.show_capture_error("请先“查找微信”并选中你允许读取的窗口，然后打开对应聊天。")
+            return
+        window, events = self.windows[index], self.reader_events
+        self.set_busy(True, operation="read")
+        self.status.set("正在读取所选微信窗口的可访问消息文字，最多等待 8 秒；不截取图片。")
+        def work():
+            try:
+                events.put((True, read_conversation(window)))
+            except CaptureError as error:
+                events.put((False, str(error)))
+            except Exception:
+                events.put((False, "当前微信消息文字读取失败，未提交任何内容给 AI。请确认该版本是否提供可访问消息文字。"))
+        threading.Thread(target=work, daemon=True).start()
 
     def show_settings(self):
         if self.busy:
@@ -261,15 +478,15 @@ class DesktopApp:
                 self.status.set("已找到微信窗口。打开需要的聊天，再点击“采集选中窗口”。")
                 self.capture_status.set(f"找到 {len(self.windows)} 个微信窗口；请选中要分析的窗口，再点击采集。")
             else:
-                self.show_capture_error("未找到微信窗口。请打开并登录电脑版微信，再点击“查找微信”。也可直接使用“系统截图（推荐）”，无需选择窗口。")
+                self.show_capture_error("未找到微信窗口。请打开并登录电脑版微信，再点击“查找微信”。也可直接使用“系统截图（备用）”，无需选择窗口。")
         except CaptureError as error:
             self.show_capture_error(str(error))
         except Exception:
-            self.show_capture_error("查找微信窗口失败。可先使用“系统截图（推荐）”截取聊天，或复制聊天文字后导入。")
+            self.show_capture_error("查找微信窗口失败。可先使用“系统截图（备用）”截取聊天，或复制聊天文字后导入。")
 
     def show_capture_error(self, message):
         self.status.set(message)
-        self.capture_status.set("采集未完成，请查看弹窗说明。可点击“系统截图（推荐）”继续。")
+        self.capture_status.set("采集未完成，请查看弹窗说明。可点击“系统截图（备用）”继续。")
         messagebox.showwarning("未完成聊天采集", message, parent=self.root)
 
     def system_screenshot(self):
@@ -299,7 +516,7 @@ class DesktopApp:
             return
         index = self.window_box.current()
         if not 0 <= index < len(self.windows):
-            self.show_capture_error("请先点击“查找微信”，在下拉框里选中微信窗口，再点击“采集选中窗口”。也可直接使用“系统截图（推荐）”。")
+            self.show_capture_error("请先点击“查找微信”，在下拉框里选中微信窗口，再点击“采集选中窗口”。也可直接使用“系统截图（备用）”。")
             return
         window, events = self.windows[index], self.capture_events
         self.set_busy(True, operation="capture")
@@ -326,6 +543,7 @@ class DesktopApp:
                 self.status.set("复制内容超过 20000 字，请仅选择最近的聊天。")
                 return
             self.context.delete("1.0", "end"); self.context.insert("1.0", text)
+            self.last_reader_text = None
             self.consent.set(False)
             self.status.set("已导入复制的文字，请检查说话者和内容，再勾选确认生成。")
         except tk.TclError:
@@ -360,10 +578,12 @@ class DesktopApp:
 
     def set_busy(self, busy, operation="generate"):
         self.busy = busy
+        self.active_operation = operation if busy else None
         for widget, normal in self.controls:
             widget.configure(state="disabled" if busy else normal)
-        self.generate_button.configure(text="正在生成，请稍候…" if busy and operation == "generate" else "生成 3 条回复  Ctrl+Enter")
+        self.generate_button.configure(text="正在生成，请稍候…" if busy and operation == "generate" else "分析并生成  Ctrl+Enter")
         self.capture_button.configure(text="正在采集，请稍候…" if busy and operation == "capture" else "采集选中窗口")
+        self.analyze_button.configure(text="正在读取会话文字…" if busy and operation == "read" else "读取当前会话文字并分析")
 
     def request_generation(self):
         if self.busy:
@@ -374,21 +594,37 @@ class DesktopApp:
         if not self.key.get().strip():
             self.status.set("请点击右上角“AI 设置”填写 API 密钥；只在本次运行保留，不要发在聊天里。")
             return
+        reply_count = 1 if self.reply_mode.get().startswith("先给") else 3
         try:
-            messages = make_messages({"context": self.context.get("1.0", "end-1c"), "intent": self.intent.get("1.0", "end-1c"), "relationship": self.relationship.get(), "tone": self.tone.get(), "images": [self.screenshot] if self.screenshot else []})
-        except InputError as error:
+            context = self.context.get("1.0", "end-1c")
+            # The reader's fixed provenance note is shown in the editor, but
+            # not part of the observed message sequence used for overlap merge.
+            if context == self.last_reader_text and context.startswith("【微信可访问消息文字；") and "\n" in context:
+                context = context.split("\n", 1)[1]
+            history, background = "", ""
+            if self.active_profile:
+                self.save_profile_fields()
+                if context.strip():
+                    self.memory.add_context(self.active_profile, context)
+                profile = self.memory.profile(self.active_profile)
+                history, background = self.memory.history_text(self.active_profile), profile["background"]
+                context = ""
+            messages = make_messages({"context": context, "history": history, "background": background, "conversation_name": self.active_profile or "", "intent": self.intent.get("1.0", "end-1c"), "relationship": self.relationship.get(), "tone": self.tone.get(), "images": [self.screenshot] if self.screenshot else [], "reply_count": reply_count, "include_analysis": True})
+        except (InputError, ValueError, OSError) as error:
             self.status.set(str(error))
             return
         config = Config(self.key.get().strip(), self.base.get().strip().rstrip("/"), self.model.get().strip())
         if not config.model:
             self.status.set("请填写模型名称。")
             return
+        self.clear_results()
         self.set_busy(True)
-        self.status.set("正在分析本次上下文并生成三条回复；通常需要数秒。")
+        self.job_started = time.monotonic()
+        self.status.set(f"正在结合本次消息、背景和已记录历史分析，生成 {reply_count} 条草稿…")
         events = self.events
         def work():
             try:
-                events.put((True, generate(config, messages)))
+                events.put((True, generate(config, messages, reply_count=reply_count, include_analysis=True)))
             except ServiceError as error:
                 events.put((False, str(error)))
             except Exception:
@@ -396,6 +632,24 @@ class DesktopApp:
         threading.Thread(target=work, daemon=True).start()
 
     def poll(self):
+        try:
+            success, value = self.reader_events.get_nowait()
+            self.set_busy(False)
+            if success:
+                self.remove_image()
+                self.context.delete("1.0", "end"); self.context.insert("1.0", value["text"])
+                self.last_reader_text = value["text"]
+                self.capture_status.set(f"已读取 {value['count']} 条可见消息文字；联系人和发言者身份仍需你核对。")
+                # The user already opted into read-and-analyze for this named
+                # conversation before the operation; no new target is selected.
+                self.consent.set(True)
+                self.request_generation()
+            else:
+                self.status.set(value)
+                self.capture_status.set("当前微信未能提供可读消息文字。本次没有提交给 AI；可先导入文字验证会话记忆。")
+                messagebox.showwarning("未能直接读取会话文字", value, parent=self.root)
+        except queue.Empty:
+            pass
         try:
             success, value = self.capture_events.get_nowait()
             self.set_busy(False)
@@ -411,15 +665,24 @@ class DesktopApp:
             success, value = self.events.get_nowait()
             self.set_busy(False)
             if success:
-                for i, reply in enumerate(value):
+                replies = value["replies"] if isinstance(value, dict) else value
+                understanding = value.get("understanding", "本次模型未返回会话理解摘要。") if isinstance(value, dict) else "本次模型未返回会话理解摘要。"
+                self.understanding.configure(state="normal"); self.understanding.delete("1.0", "end")
+                self.understanding.insert("1.0", understanding); self.understanding.configure(state="disabled")
+                self.display_reply_count(len(replies))
+                for i, reply in enumerate(replies):
                     self.reply_labels[i].configure(text=reply["label"])
                     self.reply_texts[i].delete("1.0", "end")
                     self.reply_texts[i].insert("1.0", reply["text"])
-                self.status.set("已生成三条草稿。你可以编辑、复制，再切回微信粘贴发送。")
+                seconds = time.monotonic() - self.job_started if self.job_started is not None else 0
+                self.status.set(f"已生成 {len(replies)} 条草稿，用时 {seconds:.1f} 秒。请核对 AI 理解后编辑、复制；实际发出后可点“记为已发送”。")
             else:
                 self.status.set(value)
         except queue.Empty:
             pass
+        if self.busy and self.active_operation == "generate" and self.job_started is not None:
+            seconds = int(time.monotonic() - self.job_started)
+            self.status.set(f"正在等待 AI 分析和回复，已等待 {seconds} 秒；实际用时取决于模型、网络和上下文长度。")
         self.poll_id = self.root.after(80, self.poll)
 
     def copy_reply(self, index):
@@ -437,11 +700,12 @@ class DesktopApp:
     def clear(self):
         if self.busy:
             return
-        self.context.delete("1.0", "end"); self.intent.delete("1.0", "end")
-        self.relationship.set(""); self.remove_image()
-        for text, label in zip(self.reply_texts, self.reply_labels):
-            text.delete("1.0", "end"); label.configure(text="尚未生成")
-        self.status.set("已清空本次上下文与回复。API 设置仅在本次运行保留。")
+        self.context.delete("1.0", "end"); self.remove_image()
+        self.last_reader_text = None
+        if not self.active_profile:
+            self.intent.delete("1.0", "end"); self.relationship.set("")
+        self.clear_results()
+        self.status.set("已清空当前输入和草稿；已确认的会话记忆仍保留，可在“背景/记忆”中清除或删除。")
 
     def close(self):
         if self.poll_id is not None:
