@@ -7,7 +7,7 @@
 ## Windows 快速开始
 
 1. 安装官方 Python 3.10+（包含 Tcl/Tk、pip）。
-2. 完整解压项目，双击 `start_windows.bat`，首次自动准备本地虚拟环境和 Pillow。
+2. 完整解压项目，双击 `start_windows.bat`，首次自动准备本地虚拟环境和 Pillow；pip 损坏时会备份原环境后重建一次。
 3. 点击桌面窗口右上角“AI 设置”填入 AI API 密钥，不要发在聊天里。默认使用 OpenAI API，需要单独开通 API 额度。
 4. 打开微信会话 → 系统截图（推荐）→ 框选聊天 → 回助手导入剪贴板截图 → 在预览中确认选区。也可尝试查找并直接采集选中微信窗口。
 5. 填写回复意图和语气，勾选确认提交给 AI → 生成回复 → 编辑和复制 → 回微信粘贴发送。
@@ -21,6 +21,8 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-desktop.txt
 .venv/bin/python desktop.py
 ```
+
+自动检查和准备环境也可使用 `python3 bootstrap_desktop.py --setup-only`。Windows 启动器会优先选择 Python 3.13。遇到 `pip._vendor.rich._extension` 缺失，不需要修改聊天助手代码或密钥；启动器会保留旧 `.venv` 后重新创建。新环境仍无法运行 pip 时，应修复官方 Python 安装。详见使用说明。
 
 上述为 Linux/macOS 命令；Windows 使用 `.venv\Scripts\python.exe`。桌面 UI 需要可用图形显示和 Tk；微信窗口采集仅支持 Windows。依赖固定为 Pillow 12.0.0，截图、裁剪和密钥均只在内存中处理。剪贴板内容由操作系统管理，AI 服务保留请求的政策另行适用。
 

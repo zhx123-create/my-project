@@ -4,7 +4,7 @@
 
 1. 从 [python.org](https://www.python.org/downloads/windows/) 安装 Python 3.10 或更新版本，保留默认的 Tcl/Tk、pip 和 Python Launcher 组件。
 2. 将项目或下载的 ZIP 完整解压到自己可写入的文件夹。不要直接在压缩包里运行。
-3. 双击 `start_windows.bat`。首次启动会创建项目内的 `.venv`，从 PyPI 安装固定版本的 Pillow；之后启动会复用依赖。无须管理员权限。
+3. 双击 `start_windows.bat`。启动器优先使用已安装的 Python 3.13，否则使用系统默认 Python 3。首次创建项目内的 `.venv` 并检查 pip，再从 PyPI 安装固定版本的 Pillow；之后启动会复用正常环境。无须管理员权限。
 4. 点击窗口右上角“AI 设置”填写 AI API 密钥。默认接口是 OpenAI，模型为 `gpt-4.1-mini`，需要单独开通 API 额度；ChatGPT 订阅不包含 API 额度。密钥仅在本次运行保留，关闭后需重新输入。不要把密钥发到聊天里。
 
 这是一份需要 Python 的桌面脚本包，不是已签名的独立 EXE 安装包。不需要部署网站、开启公网端口或使用云端可视化预览。
@@ -52,7 +52,11 @@
 - **用的是旧版，仍只有底部提示**：关闭旧助手，重新下载 ZIP 并解压到新文件夹，再启动其中的 `start_windows.bat`。不要覆盖旧目录中正在运行的文件。
 - **密钥错误、额度不足或模型不存在**：检查“AI 设置”。接口必须为 HTTPS、兼容 OpenAI `/chat/completions`；截图需要支持 `image_url` 的视觉模型，所有回复需要 JSON 输出支持。网络不可达时明确报错，不会生成假回复。
 - **缺少 Python 或 Tk**：重新安装官方 Python 并勾选 Tcl/Tk；不要通过 `pip install tkinter` 安装。
+- **`No module named 'pip._vendor.rich._extension'`**：这是项目虚拟环境中的 pip 缺少内部文件，发生在依赖安装阶段，与微信采集和 API 密钥无关。新启动器会检查 pip，把损坏的 `.venv` 完整保留为 `.venv.backup-时间-编号`，再在原路径重新创建一次。不会删除代码、`.env` 或旧环境中的文件。
+- **新建环境的 pip 仍不能运行**：不要反复重试或关闭校验。运行从 python.org 下载的官方 Python 安装程序，选择 Modify/Repair；或重新安装包含 pip 和 Tcl/Tk 的 Python 3.13，然后再启动。单独运行 `ensurepip --upgrade` 可能因版本相同而跳过缺失文件，不能保证修好。
 - **首次依赖下载失败**：保留终端的错误信息，确认能连接 `pypi.org` 和 `files.pythonhosted.org`。不要关闭 TLS 或包校验。
+
+新启动器的环境准备逻辑位于 `bootstrap_desktop.py`，也可通过 `py -3.13 bootstrap_desktop.py --setup-only` 单独运行。备份目录默认忽略，不会提交到 Git。若原 `.venv` 正被其他进程占用，先关闭相关助手和终端，启动器不会强行结束进程。网络下载失败不会触发重复重建。
 
 ## 当前验证范围
 

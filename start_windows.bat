@@ -1,34 +1,32 @@
 @echo off
 setlocal
 pushd "%~dp0"
-if exist ".venv\Scripts\python.exe" goto dependencies
 where py >nul 2>nul
 if errorlevel 1 goto fallback
-py -3 -m venv .venv
+py -3.13 -c "import sys" >nul 2>nul
+if errorlevel 1 goto default_python
+py -3.13 bootstrap_desktop.py
 if errorlevel 1 goto failed
-goto dependencies
+goto done
+:default_python
+py -3 bootstrap_desktop.py
+if errorlevel 1 goto failed
+goto done
 :fallback
 where python >nul 2>nul
 if errorlevel 1 goto missing
-python -m venv .venv
+python bootstrap_desktop.py
 if errorlevel 1 goto failed
-:dependencies
-".venv\Scripts\python.exe" -c "import sys; assert sys.version_info >= (3,10)"
-if errorlevel 1 goto missing
-".venv\Scripts\python.exe" -c "from PIL import __version__; assert __version__ == '12.0.0'; import tkinter" >nul 2>nul
-if not errorlevel 1 goto launch
-".venv\Scripts\python.exe" -m pip install -r requirements-desktop.txt
-if errorlevel 1 goto failed
-:launch
-".venv\Scripts\python.exe" desktop.py
-if errorlevel 1 goto failed
-popd
-exit /b 0
+goto done
 :missing
-echo Install Python 3.10 or newer from python.org, including Tcl/Tk and the Python launcher.
+echo Install Python 3.10 or newer from python.org. Python 3.13 with Tcl/Tk and pip is recommended.
 goto failed
 :failed
-echo Setup or launch failed. Read the message above. No security verification was disabled.
+echo.
+echo Setup or launch failed. Read the message above. Your existing environment was not deleted.
 pause
 popd
 exit /b 1
+:done
+popd
+exit /b 0
