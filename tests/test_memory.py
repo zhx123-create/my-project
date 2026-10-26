@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 from conversation_memory import ConversationMemory, MAX_HISTORY_CHARS
+from server import DEFAULT_STYLE
 
 
 class ConversationMemoryTests(unittest.TestCase):
@@ -27,6 +28,67 @@ class ConversationMemoryTests(unittest.TestCase):
         self.assertEqual(memory.profile("同事")["background"], "上次说周五交稿")
         self.assertTrue(memory.profile("同事")["history"])
         self.assertFalse(self.path.exists(), "providing a path must not itself enable saving")
+
+    def test_style_preferences_are_independent_and_copied(self):
+        memory = ConversationMemory()
+        requested = {"expression": "偏男性化", "personality": "慢热内敛", "humor": 0}
+        returned = memory.update_profile("同事", style=requested)
+        expected = {**DEFAULT_STYLE, **requested}
+        requested["humor"] = 3
+        returned["style"]["personality"] = "俏皮毒舌"
+        self.assertEqual(memory.profile("同事")["style"], expected)
+        self.assertEqual(memory.profile("朋友")["style"], DEFAULT_STYLE)
+        other_copy = memory.profile("朋友")
+        other_copy["style"]["humor"] = 3
+        self.assertEqual(memory.profile("朋友")["style"], DEFAULT_STYLE)
+        memory.update_profile("同事", background="项目进度")
+        self.assertEqual(memory.profile("同事")["style"], expected)
+
+    def test_style_preferences_survive_local_save_and_restore(self):
+        memory = ConversationMemory(self.path)
+        style = {"expression": "偏女性化", "personality": "活泼外向", "humor": 2, "meme_level": 3, "abstraction": 3}
+        memory.update_profile("朋友", style=style)
+        memory.update_profile("同事", style={"humor": 0, "meme_level": 0})
+        memory.set_persistent(True)
+        restored = ConversationMemory(self.path)
+        self.assertEqual(restored.profile("朋友")["style"], style)
+        self.assertEqual(restored.profile("同事")["style"], {**DEFAULT_STYLE, "humor": 0, "meme_level": 0})
+        restored.clear_history("朋友")
+        self.assertEqual(ConversationMemory(self.path).profile("朋友")["style"], style)
+
+    def test_older_memory_files_get_default_style_without_changing_history(self):
+        old = {"schema": "jiehua.conversation-memory", "version": 1, "persistent": True, "profiles": [{"name": "旧会话", "background": "保留的背景", "history": [{"kind": "context", "text": "对方：周末见。"}]}]}
+        self.path.write_text(json.dumps(old), encoding="utf-8")
+        restored = ConversationMemory(self.path)
+        self.assertEqual(restored.profile("旧会话")["style"], DEFAULT_STYLE)
+        self.assertIn("周末见", restored.history_text("旧会话"))
+        self.assertEqual(restored.profile("旧会话")["background"], "保留的背景")
+        restored.update_profile("旧会话", goal="确认时间")
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["profiles"][0]["style"], DEFAULT_STYLE)
+
+    def test_invalid_style_updates_and_saved_values_do_not_pollute_memory(self):
+        memory = ConversationMemory(self.path)
+        memory.update_profile("已存在", background="原来的背景", style={"humor": 2})
+        memory.set_persistent(True)
+        saved = self.path.read_text(encoding="utf-8")
+        profile = memory.profile("已存在")
+        for name in ("已存在", "不应创建"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    memory.update_profile(name, background="不能写入", style={"humor": True})
+                self.assertEqual(memory.profile("已存在"), profile)
+                self.assertEqual(memory.names(), ["已存在"])
+                self.assertEqual(self.path.read_text(encoding="utf-8"), saved)
+        for invalid in (None, [], {"humor": -1}, {"hidden_instruction": "不可保存"}):
+            with self.subTest(invalid=invalid):
+                damaged = json.loads(saved)
+                damaged["profiles"][0]["style"] = invalid
+                damaged_text = json.dumps(damaged, ensure_ascii=False)
+                self.path.write_text(damaged_text, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    ConversationMemory(self.path)
+                self.assertEqual(self.path.read_text(encoding="utf-8"), damaged_text)
+                self.assertEqual(memory.profile("已存在"), profile)
 
     def test_full_snapshot_and_overlapping_lines_are_not_repeated(self):
         memory = ConversationMemory()

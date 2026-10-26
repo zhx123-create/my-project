@@ -15,6 +15,14 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parent
 MAX_BODY = 13 * 1024 * 1024
 TONES = {"自然": "自然、口语化", "温柔": "温柔、体贴，不过度亲密", "幽默": "轻松幽默，避免冒犯", "简洁": "简短直接", "正式": "礼貌、正式"}
+STYLE_EXPRESSIONS = ("中性", "偏男性化", "偏女性化")
+STYLE_PERSONALITIES = ("自然", "温柔体贴", "直率爽快", "理性克制", "活泼外向", "慢热内敛", "俏皮毒舌")
+DEFAULT_STYLE = {"expression": "中性", "personality": "自然", "humor": 1, "meme_level": 1, "abstraction": 1}
+STYLE_LEVEL_LABELS = {
+    "humor": ("不刻意幽默", "轻微幽默", "明显幽默", "高强度整活"),
+    "meme_level": ("不玩梗", "少量常见梗", "适量玩梗", "梗较密集"),
+    "abstraction": ("正常表达", "轻微搞怪", "抽象搞怪", "高度抽象"),
+}
 
 
 @dataclass(frozen=True)
@@ -38,6 +46,42 @@ class ServiceError(Exception):
         self.status = status
 
 
+def validate_style(style=None):
+    """Normalize independent expression preferences; do not infer identities."""
+    if style is None:
+        return dict(DEFAULT_STYLE)
+    if not isinstance(style, dict) or set(style) - set(DEFAULT_STYLE):
+        raise InputError("风格设置必须是包含已支持维度的对象。")
+    normalized = {**DEFAULT_STYLE, **style}
+    if normalized["expression"] not in STYLE_EXPRESSIONS or normalized["personality"] not in STYLE_PERSONALITIES:
+        raise InputError("请选择支持的表达倾向和性格。")
+    for dimension in STYLE_LEVEL_LABELS:
+        value = normalized[dimension]
+        if type(value) is not int or not 0 <= value <= 3:
+            raise InputError("幽默、玩梗和抽象程度必须是 0 至 3 的整数。")
+    return normalized
+
+
+def _contains_link(text):
+    return bool(re.search(r"(?:[a-z][a-z0-9+.-]*://|www\.|(?:data|file|javascript):|(?:^|\s)//|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[/:?#]|\b))", text, re.IGNORECASE))
+
+
+def _meme_suggestion(parsed):
+    hint, tags = parsed.get("meme_hint", ""), parsed.get("meme_tags", [])
+    if not isinstance(hint, str) or len(hint) > 120 or any(character in hint for character in "\r\n\x00") or _contains_link(hint):
+        raise ValueError("invalid meme hint")
+    if not isinstance(tags, list) or len(tags) > 5:
+        raise ValueError("invalid meme tags")
+    clean = []
+    for tag in tags:
+        if not isinstance(tag, str) or not tag.strip() or len(tag) > 16 or any(character in tag for character in "\r\n\x00/\\:") or _contains_link(tag):
+            raise ValueError("invalid meme tag")
+        tag = tag.strip()
+        if tag not in clean:
+            clean.append(tag)
+    return hint.strip(), clean
+
+
 def make_messages(data):
     if not isinstance(data, dict):
         raise InputError("请求格式错误。")
@@ -55,12 +99,13 @@ def make_messages(data):
         raise InputError("背景最多 3000 字，会话历史最多 12000 字，会话名称最多 100 字。")
     if tone not in TONES:
         raise InputError("请选择支持的语气。")
+    style = validate_style(data.get("style"))
     images = data.get("images", [])
     if not isinstance(images, list) or len(images) > 3:
         raise InputError("最多选择 3 张聊天截图。")
     if not context.strip() and not history.strip() and not images:
         raise InputError("请粘贴聊天记录，或选择聊天截图。")
-    parts = [{"type": "text", "text": json.dumps({"会话标记": name, "用户填写的背景": background, "已记录的历史": history, "聊天上下文": context, "我的回复意图": intent or "自然地接续聊天", "与对方的关系": relationship or "未说明，请避免假定亲密关系", "语气": TONES[tone]}, ensure_ascii=False)}]
+    parts = [{"type": "text", "text": json.dumps({"会话标记": name, "用户填写的背景": background, "已记录的历史": history, "聊天上下文": context, "我的回复意图": intent or "自然地接续聊天", "与对方的关系": relationship or "未说明，请避免假定亲密关系", "语气": TONES[tone], "风格维度": style, "强度含义": {dimension: labels[style[dimension]] for dimension, labels in STYLE_LEVEL_LABELS.items()}}, ensure_ascii=False)}]
     for src in images:
         if not isinstance(src, str):
             raise InputError("截图格式错误。")
@@ -81,9 +126,17 @@ def make_messages(data):
         "结合已记录历史、用户填写背景与本次新内容理解当前进展。会话标记只是用户命名，不一定是对方姓名。"
         "从用户立场回复，不要把对方的话当作用户说的话；无法判断说话者时明确保留未知，不根据截图气泡位置擅自确定身份。"
         "只有用户明确确认已发送的内容可视为用户发送；候选草稿、复制操作和生成意图不代表实际已发送。"
+        "风格维度可组合：expression 是用户选择的表达倾向，不代表任何人的实际性别；personality 是用户选择的性格表达方式。"
+        "不得根据男性化、女性化或中性偏好推断身份、性格、能力或关系，不使用性别刻板印象；性格与表达倾向独立。"
+        "humor、meme_level、abstraction 分别控制幽默、玩梗、抽象搞怪程度，0至3由弱到强。综合这些维度和场合语气，不要机械堆砌梗。"
+        "只有适合当前聊天时才幽默或玩梗；面对严肃、痛苦或冲突情境，必要时主动降低强度，但不改变用户的事实和沟通意图。"
+        "俏皮毒舌应是友善的情境吐槽，不攻击人格或身份。不确定梗的含义就改用清楚表达，不编造梗的出处或热词含义。"
         "不编造个人经历、承诺、关系或已发生的事件。不要施压、羞辱或以欺骗方式操纵对方。"
         f"给出{reply_count}条可直接发送的中文候选回复，一般每条1至2句，多个候选须彼此不同。"
-        + ("先用不超过200字简要概括当前在聊什么、已知双方立场和仍未知的信息；只陈述记录支持的事实。只输出JSON，结构为{\"understanding\":\"简要会话概况\",\"replies\":[{\"label\":\"简短风格标签\",\"text\":\"回复正文\"}]}。" if include_analysis else "只输出JSON，结构为{\"replies\":[{\"label\":\"简短风格标签\",\"text\":\"回复正文\"}]}。")
+        + ("先用不超过80字简要概括当前在聊什么、已知双方立场和仍未知的信息；只陈述记录支持的事实。"
+           "场合适合配图时，附带不超过40字的表情包主题建议 meme_hint 及最多3个简短检索关键词 meme_tags，可偏抽象搞怪；"
+           "不合适时返回空字符串和空数组。只提供主题和关键词，不编造图片地址、出处或声称已找到、下载、发送表情包。"
+           "只输出JSON，结构为{\"understanding\":\"简要会话概况\",\"replies\":[{\"label\":\"简短风格标签\",\"text\":\"回复正文\"}],\"meme_hint\":\"表情包主题或空字符串\",\"meme_tags\":[\"关键词\"]}。" if include_analysis else "只输出JSON，结构为{\"replies\":[{\"label\":\"简短风格标签\",\"text\":\"回复正文\"}]}。")
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": parts}]
 
@@ -121,7 +174,8 @@ def generate(config, messages, reply_count=3, include_analysis=False):
             understanding = parsed.get("understanding")
             if not isinstance(understanding, str) or not understanding.strip() or len(understanding) > 200:
                 raise ValueError("invalid understanding")
-            return {"understanding": understanding.strip(), "replies": clean}
+            meme_hint, meme_tags = _meme_suggestion(parsed)
+            return {"understanding": understanding.strip(), "replies": clean, "meme_hint": meme_hint, "meme_tags": meme_tags}
         return clean
     except urllib.error.HTTPError as exc:
         messages_by_status = {401: "AI 服务认证失败，请检查服务端密钥。", 403: "AI 服务拒绝访问，请检查模型权限或网络配置。", 404: "AI 接口或模型不存在，请检查服务端配置。", 429: "AI 服务额度不足或请求过于频繁，请稍后重试。"}

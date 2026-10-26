@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import tempfile
 
+from server import validate_style
+
 MAX_HISTORY_CHARS = 12000
 MAX_PROFILES = 100
 MAX_ENTRIES = 60
@@ -60,7 +62,7 @@ class ConversationMemory:
         if name not in self._profiles:
             if len(self._profiles) >= MAX_PROFILES:
                 raise ValueError("最多保存 100 个会话，请先删除不需要的会话。")
-            self._profiles[name] = {"name": name, "background": "", "relationship": "", "goal": "", "history": [], "last_snapshot": ""}
+            self._profiles[name] = {"name": name, "background": "", "relationship": "", "goal": "", "style": validate_style(), "history": [], "last_snapshot": ""}
             self._save()
         return self._profiles[name]
 
@@ -69,11 +71,13 @@ class ConversationMemory:
         profile.pop("last_snapshot", None)
         return profile
 
-    def update_profile(self, name, *, background=None, relationship=None, goal=None):
+    def update_profile(self, name, *, background=None, relationship=None, goal=None, style=None):
         updates = {}
         for key, value, limit, label in (("background", background, 3000, "背景"), ("relationship", relationship, 100, "关系"), ("goal", goal, 1000, "沟通目标")):
             if value is not None:
                 updates[key] = _text(value, limit, label)
+        if style is not None:
+            updates["style"] = validate_style(style)
         profile = self._ensure(name)
         profile.update(updates)
         self._save()
@@ -198,7 +202,9 @@ class ConversationMemory:
                 name = _text(raw.get("name"), 100, "会话名称", allow_empty=False)
                 if name in loaded:
                     raise ValueError("duplicate profile")
-                profile = {"name": name, "background": _text(raw.get("background", ""), 3000, "背景"), "relationship": _text(raw.get("relationship", ""), 100, "关系"), "goal": _text(raw.get("goal", ""), 1000, "沟通目标"), "last_snapshot": _text(raw.get("last_snapshot", ""), 20000, "聊天内容"), "history": []}
+                if "style" in raw and not isinstance(raw["style"], dict):
+                    raise ValueError("invalid style")
+                profile = {"name": name, "background": _text(raw.get("background", ""), 3000, "背景"), "relationship": _text(raw.get("relationship", ""), 100, "关系"), "goal": _text(raw.get("goal", ""), 1000, "沟通目标"), "style": validate_style(raw.get("style")), "last_snapshot": _text(raw.get("last_snapshot", ""), 20000, "聊天内容"), "history": []}
                 entries = raw.get("history", [])
                 if not isinstance(entries, list) or len(entries) > MAX_ENTRIES:
                     raise ValueError("invalid history")

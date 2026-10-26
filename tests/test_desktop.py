@@ -1,6 +1,8 @@
 import gc
 import json
 import os
+from pathlib import Path
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -9,17 +11,20 @@ import unittest
 from unittest.mock import patch
 
 from PIL import Image
-from desktop import CropDialog, DesktopApp
+from desktop import CropDialog, DesktopApp, TEMP_CONVERSATION
 from conversation_memory import ConversationMemory
-from server import ServiceError
+from meme_library import MemeLibrary
+from server import DEFAULT_STYLE, ServiceError
 from windows_capture import CaptureError, Window
 
 
 @unittest.skipUnless(os.environ.get('DISPLAY') or os.name == 'nt', 'requires a desktop display')
 class DesktopTests(unittest.TestCase):
     def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='jiehua-desktop-test-')
+        self.library = MemeLibrary(Path(self.temp.name) / 'memes')
         self.root = tk.Tk()
-        self.app = DesktopApp(self.root, memory=ConversationMemory())
+        self.app = DesktopApp(self.root, memory=ConversationMemory(), meme_library=self.library)
         self.root.update()
         self.app.key.set('')
 
@@ -29,6 +34,7 @@ class DesktopTests(unittest.TestCase):
         del self.root
         # Tcl objects must be finalized on the thread that owns the interpreter.
         gc.collect()
+        self.temp.cleanup()
 
     def wait_for_job(self):
         deadline = time.monotonic() + 3
@@ -294,3 +300,104 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(history.count('周六可以'), 1)
         self.assertIn('中午怎么样', history)
         self.assertNotIn('可访问消息文字', history)
+
+    def test_style_combinations_remain_separate_across_named_and_temporary_chats(self):
+        warm = {**DEFAULT_STYLE, 'expression': '偏男性化', 'personality': '温柔体贴', 'humor': 3, 'meme_level': 0, 'abstraction': 2}
+        reserved = {**DEFAULT_STYLE, 'expression': '偏女性化', 'personality': '理性克制', 'humor': 0, 'meme_level': 3, 'abstraction': 0}
+        self.app.select_profile('朋友')
+        self.app.set_reply_style(warm)
+        self.app.select_profile('同事')
+        self.app.set_reply_style(reserved)
+        self.assertEqual(self.app.memory.profile('朋友')['style'], warm)
+        self.assertEqual(self.app.memory.profile('同事')['style'], reserved)
+        self.app.select_profile('朋友')
+        self.assertEqual(self.app.style, warm)
+        self.assertIn('偏男性化', self.app.style_summary.get())
+        self.assertIn('温柔体贴', self.app.style_summary.get())
+        self.app.select_profile('同事')
+        self.assertEqual(self.app.style, reserved)
+        self.app.select_profile(TEMP_CONVERSATION)
+        self.assertEqual(self.app.style, DEFAULT_STYLE)
+
+    def test_invalid_style_does_not_change_current_or_saved_preferences(self):
+        self.app.select_profile('朋友')
+        self.app.set_reply_style({**DEFAULT_STYLE, 'personality': '活泼外向', 'humor': 2})
+        before = dict(self.app.style)
+        summary = self.app.style_summary.get()
+        with self.assertRaises(ValueError):
+            self.app.set_reply_style({'humor': 4})
+        self.assertEqual(self.app.style, before)
+        self.assertEqual(self.app.memory.profile('朋友')['style'], before)
+        self.assertEqual(self.app.style_summary.get(), summary)
+
+    def test_style_preset_dialog_preserves_independent_expression_choice(self):
+        self.app.select_profile('朋友')
+        initial = {**DEFAULT_STYLE, 'expression': '偏女性化', 'personality': '温柔体贴'}
+        self.app.set_reply_style(initial)
+        self.app.show_reply_style(); self.root.update()
+        def find_button(widget, text):
+            for child in widget.winfo_children():
+                if child.winfo_class() == 'TButton' and child.cget('text') == text:
+                    return child
+                found = find_button(child, text)
+                if found is not None:
+                    return found
+            return None
+        preset = find_button(self.app.style_dialog, '抽象搞怪')
+        self.assertIsNotNone(preset)
+        preset.invoke()
+        self.assertEqual(self.app.style, initial, 'dialog edits are not applied until confirmation')
+        apply = find_button(self.app.style_dialog, '应用风格')
+        self.assertIsNotNone(apply)
+        apply.invoke()
+        expected = {'expression': '偏女性化', 'personality': '俏皮毒舌', 'humor': 3, 'meme_level': 3, 'abstraction': 3}
+        self.assertEqual(self.app.style, expected)
+        self.assertEqual(self.app.memory.profile('朋友')['style'], expected)
+
+    def import_test_meme(self):
+        path = Path(self.temp.name) / '抽象无语.png'
+        Image.new('RGB', (60, 60), (60, 120, 180)).save(path)
+        return self.library.import_files([path], tags='抽象,无语')[0]
+
+    def test_generation_passes_full_style_and_uses_model_theme_for_local_candidates(self):
+        self.assertFalse(self.library.directory.exists(), 'empty library should not create local files')
+        item = self.import_test_meme()
+        self.app.select_profile('朋友')
+        choice = {**DEFAULT_STYLE, 'expression': '中性', 'personality': '俏皮毒舌', 'humor': 2, 'meme_level': 3, 'abstraction': 3}
+        self.app.set_reply_style(choice)
+        self.app.tone.set('自然')
+        self.app.context.insert('1.0', '对方：今天又加班到很晚。')
+        self.app.key.set('test-only-key'); self.app.consent.set(True)
+        result = {'understanding': '对方在抱怨加班，适合先回应辛苦。', 'replies': [{'label': '轻松', 'text': '辛苦了，先歇一会儿。'}], 'meme_hint': '抽象无语的加班反应', 'meme_tags': ['抽象', '无语']}
+        with patch('desktop.generate', return_value=result) as generate:
+            self.app.request_generation(); self.wait_for_job()
+        generate.assert_called_once()
+        prompt = json.loads(generate.call_args.args[1][1]['content'][0]['text'])
+        self.assertEqual(prompt['风格维度'], choice)
+        self.assertEqual(self.app.meme_hint, result['meme_hint'])
+        self.assertEqual(self.app.meme_tags, result['meme_tags'])
+        self.assertEqual([candidate['id'] for candidate in self.app.meme_candidates], [item['id']])
+        self.assertIn('1 张候选', self.app.meme_note.get())
+        self.assertNotIn('加班反应', self.app.memory.history_text('朋友'), 'model image hint is not sent-message history')
+
+    def test_empty_meme_theme_does_not_offer_recent_images_in_serious_context(self):
+        self.import_test_meme()
+        self.app.update_meme_suggestions({'meme_hint': '抽象无语', 'meme_tags': ['无语']})
+        self.assertTrue(self.app.meme_candidates)
+        with patch.object(self.library, 'recommend') as recommend:
+            self.app.update_meme_suggestions({'meme_hint': '', 'meme_tags': []})
+        recommend.assert_not_called()
+        self.assertEqual(self.app.meme_hint, '')
+        self.assertEqual(self.app.meme_tags, [])
+        self.assertEqual(self.app.meme_candidates, [])
+        self.assertIn('没有建议配图', self.app.meme_note.get())
+
+    def test_local_meme_picker_receives_theme_without_an_extra_model_request(self):
+        self.app.update_meme_suggestions({'meme_hint': '夸张无语', 'meme_tags': ['无语']})
+        with patch('desktop.MemePicker') as picker, patch('desktop.generate') as generate:
+            self.app.show_memes()
+            picker.assert_called_once_with(self.root, self.library, query='夸张无语', tags=['无语'])
+            generate.assert_not_called()
+            self.app.show_memes()
+            picker.assert_called_once()
+            picker.return_value.lift.assert_called_once()

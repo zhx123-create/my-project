@@ -11,8 +11,12 @@ from tkinter.scrolledtext import ScrolledText
 
 from PIL import Image, ImageGrab, ImageTk
 
-from server import Config, InputError, ServiceError, TONES, generate, make_messages
+from server import (Config, InputError, ServiceError, TONES, DEFAULT_STYLE,
+                    STYLE_EXPRESSIONS, STYLE_PERSONALITIES, STYLE_LEVEL_LABELS,
+                    generate, make_messages, validate_style)
 from conversation_memory import ConversationMemory
+from meme_library import MemeLibrary
+from meme_picker import MemePicker
 from windows_capture import CaptureError, capture_window_isolated, crop_box, image_payload, list_windows
 from wechat_reader import read_conversation
 
@@ -102,7 +106,7 @@ class CropDialog(tk.Toplevel):
 
 
 class DesktopApp:
-    def __init__(self, root, memory=None):
+    def __init__(self, root, memory=None, meme_library=None):
         self.root = root
         self.root.title("接话 · Windows 微信回复助手")
         height = max(680, min(850, self.root.winfo_screenheight() - 90))
@@ -124,6 +128,18 @@ class DesktopApp:
         self.job_started = None
         self.last_reader_text = None
         self.active_profile = None
+        self.style = dict(DEFAULT_STYLE)
+        self.style_summary = tk.StringVar()
+        self.meme_warning = None
+        try:
+            self.meme_library = meme_library if meme_library is not None else MemeLibrary(default_memory_path().parent / "memes")
+        except (ValueError, OSError) as error:
+            self.meme_library = None
+            self.meme_warning = str(error)
+        self.meme_hint, self.meme_tags, self.meme_candidates = "", [], []
+        self.meme_note = tk.StringVar(value="分析后可推荐表情主题；点右侧按钮导入收藏或联网找候选。")
+        self.style_dialog = None
+        self.meme_dialog = None
         self.memory_warning = None
         if memory is not None:
             self.memory = memory
@@ -152,6 +168,7 @@ class DesktopApp:
         self.controls = []
         self.settings_dialog = None
         self._build()
+        self.refresh_style_summary()
         self.refresh_memory_options()
         if self.memory_warning:
             self.status.set(self.memory_warning)
@@ -173,6 +190,7 @@ class DesktopApp:
         ttk.Label(heading, text="  微信桌面回复助手 · 你确认，再发送").pack(side="left", pady=8)
         ttk.Checkbutton(heading, text="窗口置顶", variable=self.topmost, command=lambda: self.root.attributes("-topmost", self.topmost.get())).pack(side="right")
         self.button(heading, "AI 设置", self.show_settings, side="right", padx=12)
+        self.button(heading, "表达风格…", self.show_reply_style, side="right")
         split = tk.PanedWindow(frame, orient="horizontal", sashwidth=8, background="#f3f5ef", borderwidth=0)
         split.grid(row=1, column=0, sticky="nsew")
         self.root.after_idle(lambda: split.sash_place(0, split.winfo_width() // 2, 0))
@@ -252,6 +270,9 @@ class DesktopApp:
         relation.pack(side="left", padx=6, fill="x", expand=True); self.controls.append((relation, "normal"))
         mode = ttk.Combobox(left, textvariable=self.reply_mode, values=["先给 1 条（较快）", "生成 3 条候选"], state="readonly")
         mode.grid(row=9, column=0, sticky="ew", pady=(0, 5)); self.controls.append((mode, "readonly"))
+        style_options = ttk.Frame(left); style_options.grid(row=10, column=0, sticky="ew", pady=(4, 5))
+        ttk.Label(style_options, text="当前风格：").pack(side="left", padx=(0, 8))
+        ttk.Label(style_options, textvariable=self.style_summary, wraplength=260).pack(side="left", fill="x", expand=True)
         workflow_actions = ttk.Frame(frame)
         workflow_actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         self.confirm_box = ttk.Checkbutton(workflow_actions, text="确认会话匹配并允许提交上下文给 AI", variable=self.consent)
@@ -278,6 +299,9 @@ class DesktopApp:
             text = ScrolledText(card, height=4, wrap="word", relief="flat", font=(FONT_FAMILY, 10), padx=6, pady=6)
             text.pack(fill="both", expand=True, pady=4)
             self.reply_labels.append(label); self.reply_texts.append(text)
+        meme_bar = ttk.Frame(right); meme_bar.grid(row=5, column=0, sticky="ew", pady=(4, 0))
+        self.button(meme_bar, "表情包候选…", self.show_memes, side="right", padx=(8, 0))
+        ttk.Label(meme_bar, textvariable=self.meme_note, wraplength=270, foreground="#365f45").pack(side="left", fill="x", expand=True)
         ttk.Label(frame, textvariable=self.status, wraplength=800, foreground="#365f45").grid(row=3, column=0, sticky="ew", pady=(12, 0))
         ttk.Label(frame, textvariable=self.memory_note, wraplength=800, foreground="#6b786d").grid(row=4, column=0, sticky="w", pady=(5, 0))
 
@@ -287,7 +311,89 @@ class DesktopApp:
 
     def save_profile_fields(self):
         if self.active_profile:
-            self.memory.update_profile(self.active_profile, relationship=self.relationship.get(), goal=self.intent.get("1.0", "end-1c"))
+            self.memory.update_profile(self.active_profile, relationship=self.relationship.get(), goal=self.intent.get("1.0", "end-1c"), style=self.style)
+
+    def refresh_style_summary(self):
+        preference = self.style
+        self.style_summary.set(f"{preference['expression']} · {preference['personality']}\n幽默 {preference['humor']} / 玩梗 {preference['meme_level']} / 抽象 {preference['abstraction']}")
+
+    def set_reply_style(self, style):
+        normalized = validate_style(style)
+        if self.active_profile:
+            self.memory.update_profile(self.active_profile, style=normalized)
+        self.style = normalized
+        self.refresh_style_summary()
+
+    def show_reply_style(self):
+        if self.busy:
+            return
+        if self.style_dialog is not None and self.style_dialog.winfo_exists():
+            self.style_dialog.lift(); return
+        dialog = tk.Toplevel(self.root)
+        self.style_dialog = dialog
+        dialog.title("组合你的表达风格")
+        dialog.transient(self.root); dialog.resizable(False, False)
+        panel = ttk.Frame(dialog, padding=18); panel.pack(fill="both", expand=True)
+        ttk.Label(panel, text="按你的表达习惯自由组合。适合朋友的整活程度，也可以和工作会话不同。", wraplength=510).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        expression = tk.StringVar(dialog, value=self.style["expression"])
+        personality = tk.StringVar(dialog, value=self.style["personality"])
+        for row, (label, variable, values) in enumerate((("我的表达倾向", expression, STYLE_EXPRESSIONS), ("性格表达", personality, STYLE_PERSONALITIES)), 1):
+            ttk.Label(panel, text=label).grid(row=row, column=0, sticky="w", pady=6)
+            ttk.Combobox(panel, textvariable=variable, values=values, width=30, state="readonly").grid(row=row, column=1, sticky="ew", padx=(12, 0))
+        levels = {}
+        for row, (key, label) in enumerate((("humor", "幽默程度"), ("meme_level", "玩梗频率"), ("abstraction", "抽象程度")), 3):
+            ttk.Label(panel, text=label).grid(row=row, column=0, sticky="w", pady=6)
+            levels[key] = tk.StringVar(dialog, value=STYLE_LEVEL_LABELS[key][self.style[key]])
+            ttk.Combobox(panel, textvariable=levels[key], values=STYLE_LEVEL_LABELS[key], width=30, state="readonly").grid(row=row, column=1, sticky="ew", padx=(12, 0))
+        presets = ttk.Frame(panel); presets.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(12, 6))
+        def preset(personality_value, humor, memes, abstraction):
+            personality.set(personality_value)
+            for key, value in zip(("humor", "meme_level", "abstraction"), (humor, memes, abstraction)):
+                levels[key].set(STYLE_LEVEL_LABELS[key][value])
+        for label, values in (("稳妥日常", ("自然", 1, 0, 0)), ("轻松有梗", ("活泼外向", 2, 2, 1)), ("抽象搞怪", ("俏皮毒舌", 3, 3, 3))):
+            ttk.Button(presets, text=label, command=lambda choice=values: preset(*choice)).pack(side="left", padx=(0, 6))
+        ttk.Label(panel, text="表达倾向不代表实际性别，性格单独选择。严肃或难过的聊天会适当收敛玩梗。\n表情包只推荐候选，你看图、保存，再自行发到微信。", wraplength=510, foreground="#6b786d").grid(row=7, column=0, columnspan=2, sticky="w", pady=8)
+        actions = ttk.Frame(panel); actions.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        def save():
+            choice = {"expression": expression.get(), "personality": personality.get(), **{key: STYLE_LEVEL_LABELS[key].index(variable.get()) for key, variable in levels.items()}}
+            try:
+                self.set_reply_style(choice)
+            except (ValueError, OSError) as error:
+                messagebox.showwarning("风格未保存", str(error), parent=dialog); return
+            self.status.set("表达风格已更新，下次生成时生效。命名会话各自记住自己的组合。")
+            dialog.destroy()
+        ttk.Button(actions, text="应用风格", command=save).pack(side="right")
+        ttk.Button(actions, text="取消", command=dialog.destroy).pack(side="right", padx=8)
+        dialog.grab_set(); dialog.lift()
+
+    def update_meme_suggestions(self, result):
+        self.meme_hint = result.get("meme_hint", "") if isinstance(result, dict) else ""
+        self.meme_tags = list(result.get("meme_tags", [])) if isinstance(result, dict) else []
+        self.meme_candidates = []
+        if not self.meme_hint and not self.meme_tags:
+            self.meme_note.set("本次没有建议配图；仍可点右侧按钮浏览收藏。")
+            return
+        if self.meme_library is None:
+            self.meme_note.set("本地表情库未能读取，回复已正常生成。")
+            return
+        try:
+            self.meme_candidates = self.meme_library.recommend(self.meme_hint, self.meme_tags, limit=3)
+        except (ValueError, OSError):
+            self.meme_note.set("本地表情库未能读取；可打开候选窗口查看或联网寻找。")
+            return
+        topic = self.meme_hint or "、".join(self.meme_tags)
+        count = len(self.meme_candidates)
+        self.meme_note.set(f"配图主题：{topic}\n" + (f"本地有 {count} 张候选，点击查看。" if count else "本地暂无图片，可联网找候选或导入收藏。"))
+
+    def show_memes(self):
+        if self.busy:
+            return
+        if self.meme_library is None:
+            messagebox.showwarning("表情库未能读取", self.meme_warning or "请检查本地表情库位置和读取权限。", parent=self.root)
+            return
+        if self.meme_dialog is not None and self.meme_dialog.winfo_exists():
+            self.meme_dialog.lift(); return
+        self.meme_dialog = MemePicker(self.root, self.meme_library, query=self.meme_hint, tags=self.meme_tags)
 
     def select_profile(self, name):
         if self.busy:
@@ -307,6 +413,8 @@ class DesktopApp:
         self.intent.delete("1.0", "end")
         self.intent.insert("1.0", profile["goal"] if profile else "自然接话，简洁一点")
         self.relationship.set(profile["relationship"] if profile else "")
+        self.style = validate_style(profile["style"] if profile else None)
+        self.refresh_style_summary()
         self.clear_results()
         self.refresh_memory_options()
         self.status.set("已切换会话。请核对微信当前打开的联系人与此会话一致；程序不会自动核实联系人身份。")
@@ -390,6 +498,8 @@ class DesktopApp:
         for text, label in zip(self.reply_texts, self.reply_labels):
             text.delete("1.0", "end"); label.configure(text="尚未生成")
         self.understanding.configure(state="normal"); self.understanding.delete("1.0", "end"); self.understanding.configure(state="disabled")
+        self.meme_hint, self.meme_tags, self.meme_candidates = "", [], []
+        self.meme_note.set("分析后可推荐表情主题；点右侧按钮导入收藏或联网找候选。")
 
     def display_reply_count(self, count):
         for i, card in enumerate(self.reply_cards):
@@ -609,7 +719,7 @@ class DesktopApp:
                 profile = self.memory.profile(self.active_profile)
                 history, background = self.memory.history_text(self.active_profile), profile["background"]
                 context = ""
-            messages = make_messages({"context": context, "history": history, "background": background, "conversation_name": self.active_profile or "", "intent": self.intent.get("1.0", "end-1c"), "relationship": self.relationship.get(), "tone": self.tone.get(), "images": [self.screenshot] if self.screenshot else [], "reply_count": reply_count, "include_analysis": True})
+            messages = make_messages({"context": context, "history": history, "background": background, "conversation_name": self.active_profile or "", "intent": self.intent.get("1.0", "end-1c"), "relationship": self.relationship.get(), "tone": self.tone.get(), "style": self.style, "images": [self.screenshot] if self.screenshot else [], "reply_count": reply_count, "include_analysis": True})
         except (InputError, ValueError, OSError) as error:
             self.status.set(str(error))
             return
@@ -674,6 +784,7 @@ class DesktopApp:
                     self.reply_labels[i].configure(text=reply["label"])
                     self.reply_texts[i].delete("1.0", "end")
                     self.reply_texts[i].insert("1.0", reply["text"])
+                self.update_meme_suggestions(value)
                 seconds = time.monotonic() - self.job_started if self.job_started is not None else 0
                 self.status.set(f"已生成 {len(replies)} 条草稿，用时 {seconds:.1f} 秒。请核对 AI 理解后编辑、复制；实际发出后可点“记为已发送”。")
             else:
