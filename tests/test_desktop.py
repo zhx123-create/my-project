@@ -14,6 +14,7 @@ from PIL import Image
 from desktop import CropDialog, DesktopApp, TEMP_CONVERSATION
 from conversation_memory import ConversationMemory
 from meme_library import MemeLibrary
+from desktop_settings import DesktopSettings
 from server import DEFAULT_STYLE, ServiceError
 from windows_capture import CaptureError, Window
 
@@ -24,7 +25,7 @@ class DesktopTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix='jiehua-desktop-test-')
         self.library = MemeLibrary(Path(self.temp.name) / 'memes')
         self.root = tk.Tk()
-        self.app = DesktopApp(self.root, memory=ConversationMemory(), meme_library=self.library)
+        self.app = DesktopApp(self.root, memory=ConversationMemory(), meme_library=self.library, settings=DesktopSettings())
         self.root.update()
         self.app.key.set('')
 
