@@ -8,14 +8,13 @@ import ctypes
 import json
 import os
 from pathlib import Path
-import re
 import sys
 import tempfile
-from urllib.parse import urlsplit
+from server import normalize_api_base
 
 _SCHEMA = "jiehua.desktop-settings"
 _MAX_BYTES = 16 * 1024
-_DEFAULTS = {"base": "https://api.openai.com/v1", "model": "gpt-4.1-mini",
+_DEFAULTS = {"base": "https://api.openai.com/v1", "model": "gpt-4.1-mini", "allow_http": False,
              "auto_copy": False, "watch_interval": 10, "last_profile": ""}
 
 
@@ -75,17 +74,7 @@ def _values(raw):
     if not isinstance(raw, dict) or set(raw) - set(_DEFAULTS):
         raise ValueError("桌面设置包含不支持的字段。")
     result = {**_DEFAULTS, **raw}
-    result["base"] = _plain(result["base"], 1000, "接口地址").rstrip("/")
-    try:
-        parsed = urlsplit(result["base"])
-        hostname = parsed.hostname
-        valid_host = hostname and len(hostname) <= 253 and all(
-            re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", label)
-            for label in hostname.split("."))
-        if parsed.scheme != "https" or not valid_host or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.port is not None and not 1 <= parsed.port <= 65535:
-            raise ValueError("invalid base")
-    except ValueError:
-        raise ValueError("接口地址必须是有效的 HTTPS 地址，不能包含账号、查询参数或片段。") from None
+    result["base"] = normalize_api_base(result["base"], result["allow_http"])
     result["model"] = _plain(result["model"], 100, "模型名称")
     result["last_profile"] = _plain(result["last_profile"], 100, "会话名称", empty=True)
     if type(result["auto_copy"]) is not bool:
@@ -128,14 +117,16 @@ class DesktopSettings:
             raise ValueError("已保存的密钥无法解密，请重新填写或关闭记住密钥。") from None
 
     def update(self, **fields):
+        if isinstance(fields.get("base"), str) and fields["base"].strip().rstrip("/") != self._values["base"]:
+            fields.setdefault("allow_http", False)
         values = _values({**self._values, **fields})
         self._save(values, self._encrypted_key)
         self._values = values
 
-    def set_api(self, base: str, model: str, key: str, remember: bool):
+    def set_api(self, base: str, model: str, key: str, remember: bool, allow_http: bool = False):
         if type(remember) is not bool:
             raise ValueError("记住密钥开关必须为布尔值。")
-        values = _values({**self._values, "base": base, "model": model})
+        values = _values({**self._values, "base": base, "model": model, "allow_http": allow_http})
         key = _plain(key, 4096, "API 密钥", empty=not remember)
         encrypted = ""
         if remember:

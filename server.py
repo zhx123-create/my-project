@@ -30,10 +30,11 @@ class Config:
     key: str = ""
     base: str = "https://api.openai.com/v1"
     model: str = "gpt-4.1-mini"
+    allow_http: bool = False
 
     @classmethod
     def from_env(cls):
-        return cls(os.environ.get("CHAT_API_KEY", ""), os.environ.get("CHAT_API_BASE", cls.base).rstrip("/"), os.environ.get("CHAT_MODEL", cls.model))
+        return cls(os.environ.get("CHAT_API_KEY", ""), os.environ.get("CHAT_API_BASE", cls.base).strip().rstrip("/"), os.environ.get("CHAT_MODEL", cls.model), os.environ.get("CHAT_ALLOW_HTTP", "") == "1")
 
 
 class InputError(ValueError):
@@ -44,6 +45,69 @@ class ServiceError(Exception):
     def __init__(self, message, status=502):
         super().__init__(message)
         self.status = status
+
+
+def normalize_api_base(value, allow_http=False):
+    if type(allow_http) is not bool or not isinstance(value, str) or len(value) > 1000:
+        raise InputError("AI 接口地址或 HTTP 开关格式错误。")
+    value = value.strip().rstrip("/")
+    if not value or any(character.isspace() or not character.isprintable() for character in value):
+        raise InputError("请填写完整的接口地址，地址内不能含空格或控制字符。")
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        valid_host = hostname and len(hostname) <= 253 and all(re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", label) for label in hostname.split("."))
+        if parsed.scheme not in ("https", "http") or not valid_host or parsed.username is not None or parsed.password is not None or "?" in value or "#" in value or parsed.port is not None and not 1 <= parsed.port <= 65535:
+            raise ValueError("invalid base")
+    except ValueError:
+        raise InputError("接口地址无效，请填写 HTTP 或 HTTPS 地址，不要在地址中加入密钥、账号或查询参数。") from None
+    if parsed.scheme == "http" and not allow_http:
+        raise InputError("此接口使用 HTTP。请在 AI 设置中明确勾选“允许此 HTTP 地址”；密钥和聊天内容会明文传输。")
+    if parsed.path.endswith("/chat/completions") or parsed.path.endswith("/models"):
+        raise InputError("接口地址请只填到 /v1 等前缀，不要附加 /chat/completions 或 /models。")
+    return value
+
+
+def _api_opener():
+    # Credentials stay on the explicitly configured destination, including when
+    # HTTP was opted into. HTTPS keeps normal certificate/hostname verification.
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+    return urllib.request.build_opener(NoRedirect)
+
+
+def test_connection(config):
+    """Ask only for model IDs; never submit chats or generate a paid reply."""
+    if not config.key:
+        raise ServiceError("请先填写 API 密钥，再测试接口。", 503)
+    try:
+        base = normalize_api_base(config.base, config.allow_http)
+    except InputError as error:
+        raise ServiceError(str(error), 503) from None
+    request = urllib.request.Request(base + "/models", headers={"Authorization": "Bearer " + config.key, "Accept": "application/json"})
+    try:
+        with _api_opener().open(request, timeout=10) as response:
+            raw = response.read(512 * 1024 + 1)
+        if len(raw) > 512 * 1024:
+            raise ValueError("oversized models")
+        data = json.loads(raw)
+        models = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            raise ValueError("invalid models")
+        result = []
+        for item in models[:1000]:
+            name = item.get("id") if isinstance(item, dict) else None
+            if isinstance(name, str) and 0 < len(name) <= 100 and all(character.isprintable() for character in name) and name not in result:
+                result.append(name)
+        return result
+    except urllib.error.HTTPError as error:
+        messages = {401: "密钥认证失败（401），请检查该服务商提供的密钥。", 403: "服务拒绝访问（403），请检查密钥权限或网络限制。", 404: "该接口未提供 /models 模型列表；仍可保存设置后尝试生成。", 429: "服务请求受限（429），请检查额度或稍后再试。"}
+        raise ServiceError(messages.get(error.code, f"接口返回 HTTP {error.code}。请确认地址；测试不会跟随携带密钥的重定向。")) from None
+    except (urllib.error.URLError, OSError, TimeoutError):
+        raise ServiceError("未能连接接口，请检查地址和网络；HTTPS 还需要有效的服务器证书。") from None
+    except (ValueError, TypeError, UnicodeError):
+        raise ServiceError("接口已响应，但未返回标准模型列表；请向服务商核对模型 ID，或直接保存后尝试生成。") from None
 
 
 def validate_style(style=None):
@@ -146,17 +210,14 @@ def generate(config, messages, reply_count=3, include_analysis=False):
         raise InputError("回复数量应为 1 或 3，分析开关应为布尔值。")
     if not config.key:
         raise ServiceError("尚未配置 AI 服务密钥。请由服务管理员设置 CHAT_API_KEY 后重启。", 503)
-    parsed = urlsplit(config.base)
-    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise ServiceError("AI 服务地址配置无效，必须使用 HTTPS API 地址。", 503)
+    try:
+        base = normalize_api_base(config.base, config.allow_http)
+    except InputError as error:
+        raise ServiceError(str(error), 503) from None
     max_tokens = (400 if include_analysis else 300) if reply_count == 1 else 800
     payload = json.dumps({"model": config.model, "messages": messages, "response_format": {"type": "json_object"}, "temperature": 0.8, "max_tokens": max_tokens}, ensure_ascii=False).encode()
-    request = urllib.request.Request(config.base + "/chat/completions", data=payload, headers={"Authorization": "Bearer " + config.key, "Content-Type": "application/json"}, method="POST")
-    # Never follow redirects with an Authorization header to another destination.
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            return None
-    opener = urllib.request.build_opener(NoRedirect)
+    request = urllib.request.Request(base + "/chat/completions", data=payload, headers={"Authorization": "Bearer " + config.key, "Content-Type": "application/json"}, method="POST")
+    opener = _api_opener()
     try:
         with opener.open(request, timeout=60) as response:
             result = json.loads(response.read(1024 * 1024))

@@ -393,6 +393,56 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(self.app.meme_candidates, [])
         self.assertIn('没有建议配图', self.app.meme_note.get())
 
+    def test_http_settings_need_opt_in_and_probe_can_correct_model_case(self):
+        self.app.base.set('http://192.0.2.10/v1\u00a0')
+        self.app.model.set('GLM-5.3-Flash')
+        self.app.key.set('test-only-key')
+        self.app.show_settings()
+        self.root.update()
+        with patch('desktop.test_connection', return_value=['glm-5.3-flash']) as probe, patch('desktop.generate') as model:
+            self.app.api_test_button.invoke()
+            probe.assert_not_called()
+            self.assertIn('允许此 HTTP 地址', self.app.api_probe_note.get())
+            self.app.api_http_checkbox.invoke()
+            self.app.api_test_button.invoke()
+            deadline = time.monotonic() + 2
+            while 'disabled' in self.app.api_test_button.state() and time.monotonic() < deadline:
+                self.root.update(); time.sleep(0.01)
+            probe.assert_called_once()
+            self.assertTrue(probe.call_args.args[0].allow_http)
+            self.assertEqual(probe.call_args.args[0].base, 'http://192.0.2.10/v1')
+            model.assert_not_called()
+        self.assertEqual(self.app.model.get(), 'glm-5.3-flash')
+        self.app.base.set('http://other.example/v1')
+        self.assertFalse(self.app.allow_http.get(), 'consent must not follow an address change')
+        self.app.settings_dialog.destroy()
+
+    def test_http_config_reaches_generation_only_after_opt_in(self):
+        self.app.base.set('http://192.0.2.10/v1')
+        self.app.model.set('GLM-5.3-Flash')
+        self.app.allow_http.set(True)
+        self.app.key.set('test-only-key')
+        self.app.context.insert('1.0', '对方：周末有空吗？')
+        with patch('desktop.generate', return_value=[{'label': '自然', 'text': '我确认一下安排。'}]) as model:
+            self.app.generate_from_editor(); self.wait_for_job()
+        config = model.call_args.args[0]
+        self.assertEqual(config.base, 'http://192.0.2.10/v1')
+        self.assertEqual(config.model, 'GLM-5.3-Flash')
+        self.assertTrue(config.allow_http)
+
+    def test_probe_can_finish_after_settings_closed_without_touching_tk(self):
+        gate, finished = threading.Event(), threading.Event()
+        self.app.key.set('test-only-key')
+        self.app.show_settings()
+        def delayed(_config):
+            gate.wait(2); finished.set(); return ['model']
+        with patch('desktop.test_connection', side_effect=delayed):
+            self.app.api_test_button.invoke()
+            self.app.settings_dialog.destroy()
+            gate.set()
+            self.assertTrue(finished.wait(2))
+            self.root.update()
+
     def test_local_meme_picker_receives_theme_without_an_extra_model_request(self):
         self.app.update_meme_suggestions({'meme_hint': '夸张无语', 'meme_tags': ['无语']})
         with patch('desktop.MemePicker') as picker, patch('desktop.generate') as generate:

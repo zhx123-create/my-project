@@ -13,7 +13,7 @@ from PIL import Image, ImageGrab, ImageTk
 
 from server import (Config, InputError, ServiceError, TONES, DEFAULT_STYLE,
                     STYLE_EXPRESSIONS, STYLE_PERSONALITIES, STYLE_LEVEL_LABELS,
-                    generate, make_messages, validate_style)
+                    generate, make_messages, normalize_api_base, test_connection, validate_style)
 from conversation_memory import ConversationMemory
 from conversation_watch import ConversationWatch
 from desktop_automation import AutomationMixin
@@ -189,6 +189,16 @@ class DesktopApp(AutomationMixin):
         use_saved_endpoint = has_saved_settings and not self.config.key
         self.base = tk.StringVar(value=preferences["base"] if use_saved_endpoint else self.config.base)
         self.model = tk.StringVar(value=preferences["model"] if use_saved_endpoint else self.config.model)
+        self.allow_http = tk.BooleanVar(value=preferences["allow_http"] if use_saved_endpoint else self.config.allow_http)
+        self._http_approved_base = self.base.get().strip().rstrip("/")
+        def reset_http(*_args):
+            if self.base.get().strip().rstrip("/") != self._http_approved_base:
+                self.allow_http.set(False)
+        def approve_http(*_args):
+            if self.allow_http.get():
+                self._http_approved_base = self.base.get().strip().rstrip("/")
+        self.base.trace_add("write", reset_http)
+        self.allow_http.trace_add("write", approve_http)
         self.remember_key = tk.BooleanVar(value=preferences["remember_key"])
         self.tone = tk.StringVar(value="自然")
         self.relationship = tk.StringVar()
@@ -488,23 +498,85 @@ class DesktopApp(AutomationMixin):
         dialog.configure(background="#f5f6fb")
         dialog.title("AI 设置")
         dialog.transient(self.root); dialog.columnconfigure(1, weight=1)
-        dialog.geometry("650x360")
+        dialog.geometry("650x430")
         for row, (label, variable) in enumerate((("API 密钥", self.key), ("接口地址", self.base), ("模型", self.model))):
             ttk.Label(dialog, text=label).grid(row=row, column=0, sticky="w", padx=12, pady=8)
-            entry = ttk.Entry(dialog, textvariable=variable, show="•" if row == 0 else "")
+            entry = ttk.Combobox(dialog, textvariable=variable) if row == 2 else ttk.Entry(dialog, textvariable=variable, show="•" if row == 0 else "")
             entry.grid(row=row, column=1, sticky="ew", padx=(0, 12), pady=8)
+            if row == 2:
+                self.api_model_box = entry
+        self.api_http_checkbox = ttk.Checkbutton(dialog, text="允许此 HTTP 地址（密钥和聊天内容将明文传输）", variable=self.allow_http)
+        self.api_http_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", padx=12, pady=5)
         remember = ttk.Checkbutton(dialog, text="在这台电脑记住密钥（使用当前 Windows 用户加密）", variable=self.remember_key)
-        remember.grid(row=3, column=0, columnspan=2, sticky="w", padx=12, pady=8)
+        remember.grid(row=4, column=0, columnspan=2, sticky="w", padx=12, pady=5)
         if not supports_secure_storage() or self.settings.path is None:
             remember.configure(state="disabled")
             self.remember_key.set(False)
         explanation = "接口和模型会记住。密钥默认仅本次运行使用；勾选后加密保存在本机。" if self.settings.path is not None else "当前仅在本次运行保留设置；本地设置文件未能使用时不会覆盖原文件。"
-        ttk.Label(dialog, text=explanation + "\n默认 OpenAI API，需要单独开通 API 额度。", wraplength=600).grid(row=4, column=0, columnspan=2, sticky="w", padx=12, pady=8)
+        ttk.Label(dialog, text=explanation + "\n测试接口只获取模型列表，不提交聊天；模型 ID 以你的服务商返回值为准。", wraplength=600).grid(row=5, column=0, columnspan=2, sticky="w", padx=12, pady=8)
         note = tk.StringVar(dialog)
-        ttk.Label(dialog, textvariable=note, wraplength=600, foreground="#a34964").grid(row=5, column=0, columnspan=2, sticky="w", padx=12)
+        self.api_probe_note = note
+        ttk.Label(dialog, textvariable=note, wraplength=600, foreground="#7250b5").grid(row=6, column=0, columnspan=2, sticky="w", padx=12)
+        results = queue.Queue()
+        probe = {"closed": False, "after": None, "busy": False}
+        def cleanup(event=None):
+            if event is not None and event.widget is not dialog:
+                return
+            probe["closed"] = True
+            if probe["after"] is not None:
+                self.root.after_cancel(probe["after"])
+                probe["after"] = None
+        dialog.bind("<Destroy>", cleanup, add="+")
+        def poll_probe(config):
+            probe["after"] = None
+            if probe["closed"]:
+                return
+            try:
+                success, value = results.get_nowait()
+            except queue.Empty:
+                probe["after"] = self.root.after(80, lambda: poll_probe(config))
+                return
+            probe["busy"] = False
+            self.api_test_button.configure(state="normal", text="测试接口")
+            if config != self.current_api_config():
+                note.set("设置已改变，请重新测试当前接口。")
+            elif not success:
+                note.set(value)
+            else:
+                self.api_model_box.configure(values=value)
+                exact = [name for name in value if name.casefold() == config.model.casefold()]
+                if config.model in value:
+                    note.set(f"接口可达，模型名匹配（共 {len(value)} 个模型）；尚未发起生成。")
+                elif len(exact) == 1:
+                    self.model.set(exact[0])
+                    note.set(f"接口可达，模型名已按服务返回值校正为 {exact[0]}。")
+                else:
+                    note.set("接口可达；当前模型未在列表中找到，请从模型下拉框选择，或向服务商核对 ID。")
+        def test_api():
+            if probe["busy"]:
+                return
+            config = self.current_api_config()
+            try:
+                normalize_api_base(config.base, config.allow_http)
+                if not config.key:
+                    raise InputError("请先填写 API 密钥，再测试接口。")
+            except InputError as error:
+                note.set(str(error)); return
+            probe["busy"] = True
+            note.set("正在获取接口的模型列表…")
+            self.api_test_button.configure(state="disabled", text="正在测试…")
+            def work():
+                try:
+                    results.put((True, test_connection(config)))
+                except ServiceError as error:
+                    results.put((False, str(error)))
+                except Exception:
+                    results.put((False, "测试未完成，请检查接口地址和网络。"))
+            threading.Thread(target=work, daemon=True).start()
+            probe["after"] = self.root.after(80, lambda: poll_probe(config))
         def finish():
             try:
-                self.settings.set_api(base=self.base.get().strip(), model=self.model.get().strip(), key=self.key.get().strip(), remember=self.remember_key.get())
+                self.settings.set_api(base=self.base.get().strip(), model=self.model.get().strip(), key=self.key.get().strip(), remember=self.remember_key.get(), allow_http=self.allow_http.get())
             except (ValueError, OSError) as error:
                 note.set(str(error)); return
             self.status.set("AI 设置已更新，尚未验证连接。" if self.key.get().strip() else "尚未填写 API 密钥。可先导入并整理聊天内容。")
@@ -519,9 +591,16 @@ class DesktopApp(AutomationMixin):
             if self._watch_start_requested:
                 self.stop_watch("已取消配置")
             dialog.destroy()
-        ttk.Button(dialog, text="保存并继续", command=finish, style="Accent.TButton").grid(row=6, column=1, sticky="e", padx=12, pady=8)
+        actions = ttk.Frame(dialog)
+        actions.grid(row=7, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 10))
+        self.api_test_button = ttk.Button(actions, text="测试接口", command=test_api)
+        self.api_test_button.pack(side="left")
+        ttk.Button(actions, text="保存并继续", command=finish, style="Accent.TButton").pack(side="right")
         dialog.protocol("WM_DELETE_WINDOW", cancel)
         dialog.grab_set()
+
+    def current_api_config(self):
+        return Config(self.key.get().strip(), self.base.get().strip().rstrip("/"), self.model.get().strip(), self.allow_http.get())
 
     def refresh_windows(self):
         if self.busy:
@@ -677,7 +756,7 @@ class DesktopApp(AutomationMixin):
         except (InputError, ValueError, OSError) as error:
             self.status.set(str(error))
             return
-        config = Config(self.key.get().strip(), self.base.get().strip().rstrip("/"), self.model.get().strip())
+        config = self.current_api_config()
         if not config.model:
             self.status.set("请填写模型名称。")
             return

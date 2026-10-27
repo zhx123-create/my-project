@@ -61,8 +61,11 @@ python3 bootstrap_desktop.py --setup-only
 | `CHAT_API_KEY` | API 密钥，亦可在桌面设置中临时填写 | 无 |
 | `CHAT_API_BASE` | HTTPS OpenAI 兼容接口 | `https://api.openai.com/v1` |
 | `CHAT_MODEL` | 模型 | `gpt-4.1-mini` |
+| `CHAT_ALLOW_HTTP` | 仅设置为 `1` 时允许配置的 HTTP 接口；默认不允许 | `0` |
 
 接口需支持 `/chat/completions`、JSON 输出及 `max_tokens`。文字流程可使用只支持文字的模型；截图备用流程需要模型支持 `image_url`。会话记忆、桌面设置和表情收藏分别管理。桌面设置位于 `%LOCALAPPDATA%\JieHua\settings.json`；密钥默认只在本次运行使用，Windows 可明确选择通过当前用户的 DPAPI 加密保存，不以明文写入设置文件。
+
+自定义接口在“AI 设置”中填写地址、模型 ID 和服务商密钥。地址只填到 `/v1` 等前缀，不附加 `/chat/completions`。HTTP 地址需要明确勾选“允许此 HTTP 地址”：密钥和聊天会明文传输；更换地址会重置开关。HTTPS 的证书校验保持开启。“测试接口”只获取模型列表，不提交聊天；列表可用于校正模型名的大小写，未提供 `/models` 的服务也可保存后直接尝试生成。详见 [Windows 使用说明](docs/WINDOWS.md)。
 
 ## 验证
 

@@ -215,7 +215,7 @@ class AutomationMixin:
             # An encrypted key stays paired with the endpoint chosen when it
             # was explicitly saved. Runtime environment credentials may differ.
             if not self.settings.values()["remember_key"]:
-                fields.update(base=self.base.get().strip(), model=self.model.get().strip())
+                fields.update(base=self.base.get().strip(), model=self.model.get().strip(), allow_http=self.allow_http.get())
             self.settings.update(**fields)
         except (ValueError, OSError):
             self.status.set("本次设置仍可使用；未能保存界面偏好，请检查本地文件权限。")
