@@ -17,6 +17,7 @@ from server import (Config, InputError, ServiceError, TONES, DEFAULT_STYLE,
 from conversation_memory import ConversationMemory
 from conversation_watch import ConversationWatch
 from desktop_automation import AutomationMixin
+from desktop_screenshots import ScreenshotMixin, TEXT_SOURCE, SCREENSHOT_SOURCE
 from desktop_settings import DesktopSettings, supports_secure_storage
 from desktop_ui import apply_theme, build_desktop_ui
 from meme_library import MemeLibrary
@@ -42,17 +43,18 @@ def launch_snipping_tool():
     try:
         os.startfile("ms-screenclip:")
     except OSError:
-        raise CaptureError("无法打开系统截图工具。请手动按 Win+Shift+S 截取聊天，再点击“导入剪贴板截图”。") from None
+        raise CaptureError("无法打开系统截图工具。请手动按 Win+Shift+S 截取聊天，再点击“粘贴截图”。") from None
 
 
 class CropDialog(tk.Toplevel):
-    def __init__(self, parent, image, accept):
+    def __init__(self, parent, image, accept, region_accept=None, on_cancel=None, instructions=None):
         super().__init__(parent)
         self.title("选择允许分析的聊天区域")
         self.transient(parent)
         self.image, self.accept, self.start, self.end = image, accept, None, None
+        self.region_accept, self.on_cancel = region_accept, on_cancel
         self.result = None
-        ttk.Label(self, text="拖动框选聊天区域，再确认。只发送选区，联系人列表请留在选区外。", padding=12).pack(anchor="w")
+        ttk.Label(self, text=instructions or "拖动框选聊天区域，再确认。只发送选区，联系人列表请留在选区外。", padding=12, wraplength=900).pack(anchor="w")
         preview = image.copy()
         preview.thumbnail((min(1050, self.winfo_screenwidth() - 100), min(650, self.winfo_screenheight() - 220)), Image.Resampling.LANCZOS)
         self.preview_size = preview.size
@@ -66,7 +68,7 @@ class CropDialog(tk.Toplevel):
         self.info = tk.StringVar(value="尚未选择区域。取消后不会保留本次截图。")
         ttk.Label(self, textvariable=self.info, padding=12).pack(anchor="w")
         controls = ttk.Frame(self, padding=(12, 0, 12, 12)); controls.pack(fill="x")
-        ttk.Button(controls, text="取消", command=self.destroy).pack(side="right")
+        ttk.Button(controls, text="取消", command=self.cancel).pack(side="right")
         self.use = ttk.Button(controls, text="确认使用选区", command=self.confirm, state="disabled")
         self.use.pack(side="right", padx=8)
         self.attributes("-topmost", bool(parent.attributes("-topmost")))
@@ -77,7 +79,13 @@ class CropDialog(tk.Toplevel):
         self.lift()
         self.focus_set()
         self.grab_set()
-        self.bind("<Escape>", lambda event: self.destroy())
+        self.bind("<Escape>", lambda event: self.cancel())
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+
+    def cancel(self):
+        if self.on_cancel is not None:
+            self.on_cancel()
+        self.destroy()
 
     def begin(self, event):
         self.start = (event.x, event.y)
@@ -103,13 +111,16 @@ class CropDialog(tk.Toplevel):
     def confirm(self):
         if self.result is not None:
             try:
-                self.accept(self.image.crop(self.result))
+                if self.region_accept is not None:
+                    self.region_accept(self.result, self.image.size, self.image.crop(self.result))
+                else:
+                    self.accept(self.image.crop(self.result))
                 self.destroy()
             except CaptureError as error:
                 self.info.set(str(error))
 
 
-class DesktopApp(AutomationMixin):
+class DesktopApp(ScreenshotMixin, AutomationMixin):
     def __init__(self, root, memory=None, meme_library=None, settings=None):
         self.root = root
         self.root.title("接话 · Windows 微信回复助手")
@@ -138,6 +149,11 @@ class DesktopApp(AutomationMixin):
         self.capture_events = queue.Queue()
         self.reader_events = queue.Queue()
         self.discovery_events = queue.Queue()
+        self.screenshot_events = queue.Queue()
+        self.capture_source = tk.StringVar(value=preferences["capture_source"])
+        self._active_capture_source = preferences["capture_source"]
+        self.shot_readers = {}
+        self.shot_reader = None
         self._discovery_token = 0
         self._watch_start_requested = False
         self._pending_watch_snapshot = None
@@ -207,6 +223,8 @@ class DesktopApp(AutomationMixin):
         self.controls = []
         self.settings_dialog = None
         self._build()
+        self.capture_source.trace_add("write", self.capture_source_changed)
+        self.analyze_button.configure(text=self.primary_action_label())
         self.refresh_style_summary()
         self.refresh_memory_options()
         if preferences["last_profile"] in self.memory.names():
@@ -331,6 +349,7 @@ class DesktopApp(AutomationMixin):
             messagebox.showwarning("会话未切换", str(error), parent=self.root)
             return
         self.active_profile = profile["name"] if profile else None
+        self.shot_reader = self.shot_readers.get(self.active_profile)
         self.conversation_name.set(self.active_profile or TEMP_CONVERSATION)
         self.context.delete("1.0", "end")
         self.last_reader_text = None
@@ -413,6 +432,7 @@ class DesktopApp(AutomationMixin):
                 return
             try:
                 self.memory.delete(name)
+                self.shot_readers.pop(name, None)
             except (ValueError, OSError) as error:
                 messagebox.showwarning("未能删除", str(error), parent=dialog); return
             self.active_profile = None
@@ -630,8 +650,8 @@ class DesktopApp(AutomationMixin):
     def system_screenshot(self):
         if self.busy:
             return
-        self.status.set("请框选微信聊天；截图后从任务栏回到助手，点击“导入剪贴板截图”。")
-        self.capture_status.set("系统截图完成后，回到助手点“导入剪贴板截图”，再在预览中确认选区。")
+        self.status.set("请框选微信聊天；截图后回到助手，点主界面的“粘贴截图”识字并分析。")
+        self.capture_status.set("系统截图完成后，回到助手点“粘贴截图”，确认消息选区后会本机识字。")
         self.root.iconify()
         try:
             launch_snipping_tool()
@@ -639,15 +659,27 @@ class DesktopApp(AutomationMixin):
             self.root.deiconify()
             self.show_capture_error(str(error))
 
-    def show_crop(self, image):
+    def show_crop(self, image, accept=None, ocr=False):
         before = set(self.root.winfo_children())
         try:
-            CropDialog(self.root, image, self.attach_image)
+            if ocr:
+                dialog = CropDialog(self.root, image, accept or self.attach_image, instructions="框选聊天消息。确认后先在本机识字，再把文字交给 AI；不向模型上传截图。")
+                dialog.use.configure(text="识字并分析")
+            else:
+                CropDialog(self.root, image, accept or self.attach_image)
         except Exception:
             for widget in set(self.root.winfo_children()) - before:
                 if isinstance(widget, tk.Toplevel):
                     widget.destroy()
             self.show_capture_error("已取得截图，但预览窗口未能打开。请重启助手后重试，或先使用“导入复制文字”。")
+
+    def show_region_crop(self, image, accept_region, on_cancel):
+        try:
+            dialog = CropDialog(self.root, image, lambda _image: None, region_accept=accept_region, on_cancel=on_cancel, instructions="只框选消息区，排除联系人列表和输入框。只需绑定一次；自动截图时请将微信与助手并排放置，保持选区无遮挡。")
+            dialog.use.configure(text="绑定并开始分析")
+        except Exception:
+            self.stop_watch("选区预览未能打开")
+            self.status.set("已取得窗口画面，但选区预览未能打开。请重启助手或先使用粘贴聊天。")
 
     def capture(self):
         if self.busy:
@@ -666,7 +698,7 @@ class DesktopApp(AutomationMixin):
             except CaptureError as error:
                 events.put((False, str(error)))
             except Exception:
-                events.put((False, "微信窗口采集出现错误。请按 Win+Shift+S 截取聊天，再点击“导入剪贴板截图”。"))
+                events.put((False, "微信窗口采集出现错误。请按 Win+Shift+S 截取聊天，再点击“粘贴截图”。"))
         threading.Thread(target=work, daemon=True).start()
 
     def import_text(self):
@@ -726,7 +758,7 @@ class DesktopApp(AutomationMixin):
             widget.configure(state="disabled" if busy and not keep_editable else normal)
         self.generate_button.configure(text="正在生成…" if busy and operation == "generate" else "用编辑内容生成")
         self.capture_button.configure(text="正在采集，请稍候…" if busy and operation == "capture" else "采集选中窗口")
-        self.analyze_button.configure(text="正在读取…" if busy and operation in ("read", "watch_read") else "一键分析当前聊天")
+        self.analyze_button.configure(text="正在读取…" if busy and operation in ("read", "watch_read", "ocr", "bind_region") else self.primary_action_label())
 
     def request_generation(self):
         if self.busy:
@@ -742,7 +774,7 @@ class DesktopApp(AutomationMixin):
             context = self.context.get("1.0", "end-1c")
             # The reader's fixed provenance note is shown in the editor, but
             # not part of the observed message sequence used for overlap merge.
-            if context == self.last_reader_text and context.startswith("【微信可访问消息文字；") and "\n" in context:
+            if context == self.last_reader_text and context.startswith(("【微信可访问消息文字；", "【本机截图识别；")) and "\n" in context:
                 context = context.split("\n", 1)[1]
             history, background = "", ""
             if self.active_profile:
@@ -784,6 +816,7 @@ class DesktopApp(AutomationMixin):
 
     def poll(self):
         self.poll_discovery()
+        self.poll_screenshots()
         try:
             success, value = self.reader_events.get_nowait()
             self.set_busy(False)

@@ -33,10 +33,15 @@ class AutomationMixin:
         self.consent.set(True)
         index = self.window_box.current()
         if 0 <= index < len(self.windows):
+            if self.screenshot_mode() and (self.shot_reader is None or not self.shot_reader.matches(self.active_profile, self.windows[index])):
+                self.bind_chat_region(self.windows[index])
+                return
             if self._watch_start_requested:
                 self._begin_watch(self.windows[index])
             if self.watch.active:
                 self._read_watch()
+            elif self.screenshot_mode():
+                self.read_screenshot_once(self.windows[index])
             else:
                 self.analyze_current_chat()
             return
@@ -105,7 +110,8 @@ class AutomationMixin:
         self._watch_start_requested = False
         self._pending_watch_snapshot = None
         self.watch_button.configure(text="暂停自动辅助", style="Accent.TButton")
-        self.watch_status.set(f"自动辅助中 · 每 {self.watch.interval} 秒检查 · 请保持微信停留在此聊天")
+        source = "截图识字" if self.screenshot_mode() else "窗口文字"
+        self.watch_status.set(f"自动辅助中 · {source} · 每 {self.watch.interval} 秒检查 · 请保持此聊天可见")
 
     def stop_watch(self, reason="已暂停自动辅助"):
         self.watch.stop(reason)
@@ -121,6 +127,7 @@ class AutomationMixin:
             return
         self.watch.mark_check(time.monotonic())
         token, window, profile = self.watch.generation, self.watch.window, self.watch.profile
+        shot_reader = self.shot_reader if self.screenshot_mode() else None
         self.set_busy(True, operation="watch_read")
         self.watch_status.set("自动辅助中 · 正在检查新内容…")
         events = self.reader_events
@@ -129,7 +136,7 @@ class AutomationMixin:
                 current = next((candidate for candidate in list_windows() if candidate.handle == window.handle and candidate.pid == window.pid), None)
                 if current is None or current.title != window.title:
                     raise CaptureError("微信窗口已关闭或标题发生变化，请核对聊天后重新开启自动辅助。")
-                snapshot = read_conversation(window)
+                snapshot = shot_reader.read(window) if shot_reader is not None else read_conversation(window)
                 events.put((True, {"__watch_token": token, "profile": profile, "snapshot": snapshot}))
             except CaptureError as error:
                 events.put((False, {"__watch_token": token, "error": str(error)}))
@@ -211,7 +218,7 @@ class AutomationMixin:
                 self.watch.interval = self.watch_interval.get()
                 self.watch.mark_check(time.monotonic())
                 self.watch_status.set(f"自动辅助中 · 每 {self.watch.interval} 秒检查")
-            fields = {"auto_copy": self.auto_copy.get(), "watch_interval": self.watch_interval.get(), "last_profile": self.active_profile if self.memory.persistent and self.active_profile else ""}
+            fields = {"auto_copy": self.auto_copy.get(), "watch_interval": self.watch_interval.get(), "last_profile": self.active_profile if self.memory.persistent and self.active_profile else "", "capture_source": self.capture_source.get()}
             # An encrypted key stays paired with the endpoint chosen when it
             # was explicitly saved. Runtime environment credentials may differ.
             if not self.settings.values()["remember_key"]:

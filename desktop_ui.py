@@ -136,6 +136,7 @@ def build_desktop_ui(app):
     left_heading = ttk.Frame(left_body, style="Card.TFrame"); left_heading.grid(row=0, column=0, sticky="ew", pady=(0, 12))
     ttk.Label(left_heading, text="聊天上下文", style="Title.Card.TLabel").pack(side="left")
     button(left_heading, "粘贴聊天", app.import_text, style="Quiet.TButton", side="right")
+    button(left_heading, "粘贴截图", app.paste_screenshot, style="Quiet.TButton", side="right", padx=(0, 5))
     app.input_canvas = tk.Canvas(left_body, background=COLORS["surface"], highlightthickness=0, borderwidth=0)
     app.input_canvas.grid(row=1, column=0, sticky="nsew")
     scroll = ttk.Scrollbar(app.input_canvas, orient="vertical", command=app.input_canvas.yview)
@@ -214,7 +215,7 @@ def build_desktop_ui(app):
     app.capture_button = button(capture_tools, "采集选中窗口", app.capture, style="Soft.TButton", fill="x", expand=True)
     app.screen_button = button(capture_tools, "系统截图", app.system_screenshot, style="Soft.TButton", padx=(5, 0), fill="x", expand=True)
     image_tools = ttk.Frame(tools, style="Card.TFrame"); image_tools.grid(row=3, column=0, sticky="ew", pady=5)
-    button(image_tools, "导入剪贴板截图", app.import_image, style="Quiet.TButton")
+    button(image_tools, "导入原图（需视觉模型）", app.import_image, style="Quiet.TButton")
     button(image_tools, "移除截图", app.remove_image, style="Quiet.TButton", side="right")
     app.preview = ttk.Label(tools, text="未附加截图（最多 1 张）", style="Muted.Card.TLabel")
     app.preview.grid(row=4, column=0, sticky="w", pady=(0, 7))
@@ -234,6 +235,13 @@ def build_desktop_ui(app):
         chooser.pack(side="right"); app.controls.append((chooser, "readonly"))
         if hasattr(app, "remember_ui_preferences"):
             chooser.bind("<<ComboboxSelected>>", lambda _event: app.remember_ui_preferences())
+    mode_row = ttk.Frame(tools, style="Card.TFrame"); mode_row.grid(row=8, column=0, sticky="ew", pady=(8, 0))
+    ttk.Label(mode_row, text="采集方式", style="Muted.Card.TLabel").pack(side="left")
+    source_mode = ttk.Combobox(mode_row, textvariable=app.capture_source, values=["窗口文字", "截图转文字"], state="readonly", width=12)
+    source_mode.pack(side="left", padx=8); app.controls.append((source_mode, "readonly"))
+    button(mode_row, "重选区域", app.rebind_screenshot, style="Quiet.TButton", side="right")
+    file_tools = ttk.Frame(tools, style="Card.TFrame"); file_tools.grid(row=9, column=0, sticky="ew", pady=(6, 0))
+    button(file_tools, "打开截图文件并识字", app.open_screenshot_file, style="Quiet.TButton")
 
     right.columnconfigure(0, weight=1)
     ttk.Label(right, text="回复工作台", style="Title.Card.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 12))
@@ -268,6 +276,7 @@ def build_desktop_ui(app):
     action_bar = ttk.Frame(page); action_bar.grid(row=3, column=0, sticky="ew", pady=(14, 0))
     app.analyze_button = button(action_bar, "一键分析当前聊天", getattr(app, "quick_analyze", app.analyze_current_chat), style="Accent.TButton")
     app.generate_button = button(action_bar, "用编辑内容生成", getattr(app, "generate_from_editor", app.request_generation), padx=(10, 0))
+    app.screenshot_button = button(action_bar, "截图识字", app.start_screenshot_analysis, style="Soft.TButton", padx=(8, 0))
     if hasattr(app, "toggle_watch"):
         app.watch_button = ttk.Button(action_bar, text="开启自动辅助", command=app.toggle_watch, style="Soft.TButton")
         app.watch_button.pack(side="right")

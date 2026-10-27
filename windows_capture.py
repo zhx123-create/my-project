@@ -19,7 +19,7 @@ _CAPTURE_MESSAGES = {
     "blank": "微信窗口返回了空白或纯色画面，当前微信渲染方式可能不支持直接采集。",
     "capture_failed": "窗口采集失败，请打开对应聊天并保持窗口可见后重试。",
 }
-_SCREENSHOT_FALLBACK = "请按 Win+Shift+S 只截取聊天区域，再回助手点击“导入剪贴板截图”。"
+_SCREENSHOT_FALLBACK = "请按 Win+Shift+S 只截取聊天区域，再回助手点击“粘贴截图”。"
 
 
 class CaptureError(Exception):

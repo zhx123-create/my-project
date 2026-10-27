@@ -161,7 +161,7 @@ class DesktopTests(unittest.TestCase):
             self.app.screen_button.invoke()
             launch.assert_called_once(); minimize.assert_called_once()
             clipboard.assert_not_called()
-        self.assertIn('导入剪贴板截图', self.app.capture_status.get())
+        self.assertIn('粘贴截图', self.app.capture_status.get())
 
     def test_failed_system_screenshot_restores_assistant(self):
         with patch('desktop.launch_snipping_tool', side_effect=CaptureError('请手动按 Win+Shift+S')), patch.object(self.root, 'iconify'), patch.object(self.root, 'deiconify') as restore, patch('desktop.messagebox.showwarning') as warning:

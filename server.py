@@ -239,7 +239,7 @@ def generate(config, messages, reply_count=3, include_analysis=False):
             return {"understanding": understanding.strip(), "replies": clean, "meme_hint": meme_hint, "meme_tags": meme_tags}
         return clean
     except urllib.error.HTTPError as exc:
-        messages_by_status = {401: "AI 服务认证失败，请检查服务端密钥。", 403: "AI 服务拒绝访问，请检查模型权限或网络配置。", 404: "AI 接口或模型不存在，请检查服务端配置。", 429: "AI 服务额度不足或请求过于频繁，请稍后重试。"}
+        messages_by_status = {400: "AI 接口拒绝请求（400）。请核对模型和 JSON 输出支持；截图可改用“截图识字”，先在本机转成文字。", 401: "AI 服务认证失败，请检查服务端密钥。", 403: "AI 服务拒绝访问，请检查模型权限或网络配置。", 404: "AI 接口或模型不存在，请检查服务端配置。", 415: "接口不接受此图片或内容格式。请使用“截图识字”先在本机转为文字。", 429: "AI 服务额度不足或请求过于频繁，请稍后重试。"}
         raise ServiceError(messages_by_status.get(exc.code, "AI 服务返回错误，请检查接口是否支持聊天、图片及 JSON 输出。")) from None
     except (urllib.error.URLError, TimeoutError, OSError):
         raise ServiceError("暂时无法连接 AI 服务，请稍后重试。") from None

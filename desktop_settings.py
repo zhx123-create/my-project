@@ -15,7 +15,7 @@ from server import normalize_api_base
 _SCHEMA = "jiehua.desktop-settings"
 _MAX_BYTES = 16 * 1024
 _DEFAULTS = {"base": "https://api.openai.com/v1", "model": "gpt-4.1-mini", "allow_http": False,
-             "auto_copy": False, "watch_interval": 10, "last_profile": ""}
+             "auto_copy": False, "watch_interval": 10, "last_profile": "", "capture_source": "窗口文字"}
 
 
 def supports_secure_storage() -> bool:
@@ -77,6 +77,8 @@ def _values(raw):
     result["base"] = normalize_api_base(result["base"], result["allow_http"])
     result["model"] = _plain(result["model"], 100, "模型名称")
     result["last_profile"] = _plain(result["last_profile"], 100, "会话名称", empty=True)
+    if result["capture_source"] not in ("窗口文字", "截图转文字"):
+        raise ValueError("采集方式请选择窗口文字或截图转文字。")
     if type(result["auto_copy"]) is not bool:
         raise ValueError("自动复制开关必须为布尔值。")
     if type(result["watch_interval"]) is not int or result["watch_interval"] not in (5, 10, 20, 30):
