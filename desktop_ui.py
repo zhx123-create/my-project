@@ -169,7 +169,7 @@ def build_desktop_ui(app):
     app.context = _text(inputs, height=6)
     app.context.grid(row=0, column=0, sticky="nsew")
     app.controls.append((app.context, "normal"))
-    _placeholder(app.context, "打开微信中的聊天，点击下方一键分析。\n也可以直接粘贴最近的对话。")
+    _placeholder(app.context, "在微信空白输入框按 Ctrl+Alt+R，\n自动读取并填入回复。也可点下方\n“一键填入微信”，或粘贴聊天。")
     ttk.Label(inputs, text="这次想怎么聊？", style="Title.Card.TLabel").grid(row=2, column=0, sticky="w", pady=(13, 8))
     app.intent = _text(inputs, height=1, padding=9)
     app.intent.grid(row=3, column=0, sticky="ew")
@@ -281,7 +281,9 @@ def build_desktop_ui(app):
     ttk.Label(meme_bar, textvariable=app.meme_note, style="Muted.Card.TLabel", wraplength=245).pack(side="left", fill="x", expand=True)
 
     action_bar = ttk.Frame(page); action_bar.grid(row=3, column=0, sticky="ew", pady=(14, 0))
-    app.analyze_button = button(action_bar, "一键分析当前聊天", getattr(app, "quick_analyze", app.analyze_current_chat), style="Accent.TButton")
+    app.quickfill_button = ttk.Button(action_bar, text="一键填入微信", command=app.start_quickfill, style="Accent.TButton")
+    app.quickfill_button.pack(side="left", padx=(0, 8))
+    app.analyze_button = button(action_bar, "一键分析当前聊天", getattr(app, "quick_analyze", app.analyze_current_chat))
     app.generate_button = button(action_bar, "用编辑内容生成", getattr(app, "generate_from_editor", app.request_generation), padx=(10, 0))
     app.screenshot_button = button(action_bar, "截取微信", app.start_screenshot_analysis, style="Soft.TButton", padx=(8, 0))
     if hasattr(app, "toggle_watch"):

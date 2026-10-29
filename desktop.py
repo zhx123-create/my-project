@@ -18,6 +18,8 @@ from conversation_memory import ConversationMemory
 from conversation_watch import ConversationWatch
 from desktop_automation import AutomationMixin
 from desktop_robot import RobotMixin
+from desktop_quickfill import QuickFillMixin
+from wechat_hotkey import WeChatHotkey
 from desktop_screenshots import ScreenshotMixin, TEXT_SOURCE, SCREENSHOT_SOURCE, VISION_HEADER
 from desktop_settings import DesktopSettings, supports_secure_storage
 from desktop_ui import apply_theme, build_desktop_ui
@@ -146,7 +148,7 @@ class CropDialog(tk.Toplevel):
                 self.info.set(str(error))
 
 
-class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin):
+class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin, QuickFillMixin):
     def __init__(self, root, memory=None, meme_library=None, settings=None):
         self.root = root
         self.root.title("接话 · Windows 微信回复助手")
@@ -179,6 +181,13 @@ class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin):
         self.capture_source = tk.StringVar(value=preferences["capture_source"])
         self.robot = None
         self.robot_events = queue.Queue()
+        self.quickfill_job = None
+        self.quickfill_events = queue.Queue()
+        self.hotkey_events = queue.Queue()
+        self.quickfill_countdown = None
+        self.quickfill_generation_started = None
+        self.quickfill_restore_on_error = False
+        self.hotkey_listener = WeChatHotkey(self.hotkey_events)
         self._active_capture_source = preferences["capture_source"]
         self.shot_readers = {}
         self.shot_reader = None
@@ -226,7 +235,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin):
         self.screenshot = None
         self.preview_photo = None
         self.windows = []
-        self.status = tk.StringVar(value="选择会话后，一键分析当前聊天；也可以开启自动辅助，定时生成新草稿。")
+        self.status = tk.StringVar(value="在独立微信聊天的空白输入框按 Ctrl+Alt+R，自动读取并填入回复；也可点击“一键填入微信”选窗。")
         self.window_choice = tk.StringVar()
         self.capture_status = tk.StringVar(value="优先读取消息文字。请确认微信中打开的联系人，与下方记忆会话一致。")
         self.conversation_name = tk.StringVar(value=TEMP_CONVERSATION)
@@ -268,6 +277,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin):
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Control-Return>", lambda event: self.generate_from_editor())
         self.poll_id = self.root.after(80, self.poll)
+        self.hotkey_listener.start()
 
     def button(self, parent, text, command, **kwargs):
         button = ttk.Button(parent, text=text, command=command)
@@ -919,6 +929,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin):
         threading.Thread(target=work, daemon=True).start()
 
     def poll(self):
+        self.poll_quickfill()
         self.poll_robot()
         self.poll_discovery()
         self.poll_screenshots()
@@ -1041,6 +1052,8 @@ class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin):
         self.status.set("已清空当前输入和草稿；已确认的会话记忆仍保留，可在“背景/记忆”中清除或删除。")
 
     def close(self):
+        self.cancel_quickfill(closing=True)
+        self.hotkey_listener.stop()
         self.stop_robot()
         self.stop_watch("助手已关闭")
         self.remember_ui_preferences()
