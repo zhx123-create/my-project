@@ -48,6 +48,7 @@ class ConversationWatchTests(unittest.TestCase):
         self.assertEqual(self.watch.profile, "同事")
 
     def test_prefix_and_blank_lines_are_normalized_without_inventing_speakers(self):
+        self.assertEqual(normalize_snapshot("【大模型截图转写；可能有错字，发言者及会话身份请核对】\n未知：周五有空吗？"), "未知：周五有空吗？")
         self.start()
         text = HEADER + "  这个周末见吗？ \r\n\r\n我还没确定。  "
         self.assertEqual(self.watch.accept_snapshot(text, now=100), "changed")

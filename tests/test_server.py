@@ -11,6 +11,16 @@ import server
 
 
 class PromptTests(unittest.TestCase):
+    def test_vision_transcription_requires_an_image_and_analysis(self):
+        image = 'data:image/png;base64,' + base64.b64encode(b'\x89PNG\r\n\x1a\nimage').decode()
+        messages = server.make_messages({'images': [image], 'include_analysis': True, 'transcribe_images': True})
+        self.assertEqual(messages[1]['content'][1]['image_url']['url'], image)
+        self.assertIn('screenshot_text', messages[0]['content'])
+        self.assertIn('不可从文字历史编造转写', messages[0]['content'])
+        for extra in ({'transcribe_images': 'yes'}, {'transcribe_images': True}, {'transcribe_images': True, 'include_analysis': True}):
+            with self.subTest(extra=extra), self.assertRaises(server.InputError):
+                server.make_messages({'context': '已有文字', **extra})
+
     def test_context_intent_and_screenshot_are_sent(self):
         image = 'data:image/png;base64,' + base64.b64encode(b'\x89PNG\r\n\x1a\nimage').decode()
         messages = server.make_messages({'context': '对方：周末见吗？', 'intent': '委婉拒绝', 'images': [image]})
@@ -78,6 +88,33 @@ class PromptTests(unittest.TestCase):
 class GenerationTests(unittest.TestCase):
     def setUp(self):
         self.config = server.Config(key='test-only-key')
+
+    def test_vision_returns_transcript_in_one_request_with_room_for_text(self):
+        content = {'understanding': '正在约时间。', 'replies': [{'label': '自然', 'text': '我确认一下安排。'}], 'screenshot_text': '  未知：周五有空吗？\n未知：我看一下。  '}
+        upstream = {'choices': [{'message': {'content': json.dumps(content)}}]}
+        with patch('server.urllib.request.OpenerDirector.open', return_value=io.BytesIO(json.dumps(upstream).encode())) as opened:
+            result = server.generate(self.config, [], reply_count=1, include_analysis=True, transcribe_images=True)
+        opened.assert_called_once()
+        self.assertEqual(result['screenshot_text'], content['screenshot_text'].strip())
+        self.assertGreaterEqual(json.loads(opened.call_args.args[0].data)['max_tokens'], 2000)
+
+    def test_missing_empty_or_invalid_vision_transcript_is_not_success(self):
+        for text in (None, '', '  ', 17, '字' * 3001):
+            content = {'understanding': '正在聊天。', 'replies': [{'label': '自然', 'text': '你好。'}], 'screenshot_text': text}
+            upstream = {'choices': [{'message': {'content': json.dumps(content)}}]}
+            with self.subTest(text=str(text)[:20]), patch('server.urllib.request.OpenerDirector.open', return_value=io.BytesIO(json.dumps(upstream).encode())):
+                with self.assertRaises(server.ServiceError) as raised:
+                    server.generate(self.config, [], reply_count=1, include_analysis=True, transcribe_images=True)
+            self.assertIn('截图', str(raised.exception))
+
+    def test_image_rejection_explains_capability_without_leaking_response(self):
+        for code in (400, 415):
+            error = urllib.error.HTTPError('https://api.openai.com', code, 'secret-body', {}, None)
+            with self.subTest(code=code), patch('server.urllib.request.OpenerDirector.open', side_effect=error):
+                with self.assertRaises(server.ServiceError) as raised:
+                    server.generate(self.config, [], reply_count=1, include_analysis=True, transcribe_images=True)
+            self.assertIn('image_url', str(raised.exception))
+            self.assertNotIn('secret-body', str(raised.exception))
 
     def test_upstream_request_and_reply_parsing(self):
         replies = [{'label': '自然', 'text': f'回复 {i}'} for i in range(3)]

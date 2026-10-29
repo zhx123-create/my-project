@@ -1,4 +1,4 @@
-"""Bound screenshot regions and local OCR, with no image upload to the model."""
+"""Bound local OCR plus an explicit model-vision route for approved crops."""
 from dataclasses import dataclass
 import hashlib
 import queue
@@ -13,6 +13,7 @@ from windows_ocr import recognize_image
 
 TEXT_SOURCE = "窗口文字"
 SCREENSHOT_SOURCE = "截图转文字"
+VISION_HEADER = "【大模型截图转写；可能有错字，发言者及会话身份请核对】\n"
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,37 @@ class ScreenshotMixin:
             self.show_crop(image, accept=self.analyze_screenshot_image, ocr=True)
         except Exception:
             self.status.set("无法打开这张截图，请选择正常的 PNG、JPEG、WebP 或 BMP 图片，最多 4000 万像素。")
+
+    def analyze_vision_image(self, image):
+        if self.busy:
+            return
+        if not self.key.get().strip():
+            self.resume_action = lambda: self.analyze_vision_image(image)
+            self.show_settings()
+            return
+        # The explicit button approves only this cropped image, not future
+        # automatic image uploads. Automatic screenshots retain local OCR.
+        self.attach_image(image)
+        self.consent.set(True)
+        self.capture_status.set("已确认选区，将直接交给当前大模型看图；成功后在左侧显示转写文字。")
+        self.request_generation()
+
+    def show_vision_transcript(self, text):
+        if not isinstance(text, str) or not text.strip() or len(text) > 3000:
+            return "模型未返回截图转写，请检查当前模型的图片输入支持。"
+        text = text.strip()
+        self.remove_image()
+        snapshot = VISION_HEADER + text
+        self.context.delete("1.0", "end"); self.context.insert("1.0", snapshot)
+        self.last_reader_text = snapshot
+        self._last_reader_profile = self.active_profile
+        self.capture_status.set("大模型已返回截图转写，显示在左侧；请核对错字和说话者。之后可直接用文字继续分析。")
+        if self.active_profile:
+            try:
+                self.memory.add_context(self.active_profile, text)
+            except (ValueError, OSError):
+                return "截图文字已显示，但本次会话记忆保存失败，请检查本地文件权限。"
+        return "截图转写已显示在左侧，请核对后继续。"
 
     def analyze_screenshot_image(self, image, watch_seed=False, reader=None):
         if self.busy:

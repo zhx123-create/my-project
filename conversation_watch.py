@@ -29,7 +29,7 @@ def normalize_snapshot(text):
     if not isinstance(text, str) or len(text) > MAX_SNAPSHOT_CHARS:
         raise ValueError("自动检查的聊天文字必须是最多 12000 字的文字。")
     lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
-    if lines and lines[0].strip() in (_READER_HEADER, "【本机截图识别；发言者及会话身份未自动核实，请核对】"):
+    if lines and lines[0].strip() in (_READER_HEADER, "【本机截图识别；发言者及会话身份未自动核实，请核对】", "【大模型截图转写；可能有错字，发言者及会话身份请核对】"):
         lines = lines[1:]
     normalized = "\n".join(line.strip() for line in lines if line.strip())
     if not normalized:

@@ -17,7 +17,7 @@ from server import (Config, InputError, ServiceError, TONES, DEFAULT_STYLE,
 from conversation_memory import ConversationMemory
 from conversation_watch import ConversationWatch
 from desktop_automation import AutomationMixin
-from desktop_screenshots import ScreenshotMixin, TEXT_SOURCE, SCREENSHOT_SOURCE
+from desktop_screenshots import ScreenshotMixin, TEXT_SOURCE, SCREENSHOT_SOURCE, VISION_HEADER
 from desktop_settings import DesktopSettings, supports_secure_storage
 from desktop_ui import apply_theme, build_desktop_ui
 from meme_library import MemeLibrary
@@ -47,16 +47,17 @@ def launch_snipping_tool():
 
 
 class CropDialog(tk.Toplevel):
-    def __init__(self, parent, image, accept, region_accept=None, on_cancel=None, instructions=None):
+    def __init__(self, parent, image, accept, region_accept=None, on_cancel=None, instructions=None, vision_accept=None):
         super().__init__(parent)
         self.title("选择允许分析的聊天区域")
         self.transient(parent)
         self.image, self.accept, self.start, self.end = image, accept, None, None
         self.region_accept, self.on_cancel = region_accept, on_cancel
+        self.vision_accept = vision_accept
         self.result = None
         ttk.Label(self, text=instructions or "拖动框选聊天区域，再确认。只发送选区，联系人列表请留在选区外。", padding=12, wraplength=900).pack(anchor="w")
         preview = image.copy()
-        preview.thumbnail((min(1050, self.winfo_screenwidth() - 100), min(650, self.winfo_screenheight() - 220)), Image.Resampling.LANCZOS)
+        preview.thumbnail((min(1050, self.winfo_screenwidth() - 100), min(650, self.winfo_screenheight() - (330 if vision_accept is not None else 250))), Image.Resampling.LANCZOS)
         self.preview_size = preview.size
         self.photo = ImageTk.PhotoImage(preview, master=self)
         self.canvas = tk.Canvas(self, width=preview.width, height=preview.height, highlightthickness=0, cursor="crosshair")
@@ -68,9 +69,18 @@ class CropDialog(tk.Toplevel):
         self.info = tk.StringVar(value="尚未选择区域。取消后不会保留本次截图。")
         ttk.Label(self, textvariable=self.info, padding=12).pack(anchor="w")
         controls = ttk.Frame(self, padding=(12, 0, 12, 12)); controls.pack(fill="x")
-        ttk.Button(controls, text="取消", command=self.cancel).pack(side="right")
+        cancel = ttk.Button(controls, text="取消", command=self.cancel)
+        if vision_accept is not None:
+            cancel.pack(anchor="e")
+            self.vision_use = ttk.Button(controls, text="大模型看图并分析", command=self.confirm_vision, state="disabled", style="Accent.TButton")
+            self.vision_use.pack(fill="x", pady=(8, 0))
+        else:
+            cancel.pack(side="right")
         self.use = ttk.Button(controls, text="确认使用选区", command=self.confirm, state="disabled")
-        self.use.pack(side="right", padx=8)
+        if vision_accept is not None:
+            self.use.pack(fill="x", pady=(8, 0))
+        else:
+            self.use.pack(side="right", padx=8)
         self.attributes("-topmost", bool(parent.attributes("-topmost")))
         self.update_idletasks()
         x = max(0, (self.winfo_screenwidth() - self.winfo_reqwidth()) // 2)
@@ -93,6 +103,8 @@ class CropDialog(tk.Toplevel):
         self.canvas.delete("selection")
         self.canvas.create_rectangle(event.x, event.y, event.x, event.y, outline="#2b9e68", width=3, tags="selection")
         self.use.configure(state="disabled")
+        if self.vision_accept is not None:
+            self.vision_use.configure(state="disabled")
 
     def drag(self, event):
         if self.start is None:
@@ -102,10 +114,14 @@ class CropDialog(tk.Toplevel):
         try:
             self.result = crop_box(self.start, self.end, self.preview_size, self.image.size)
             self.use.configure(state="normal")
+            if self.vision_accept is not None:
+                self.vision_use.configure(state="normal")
             self.info.set("仅将框选区域加入本次上下文；此时尚未发送给 AI。")
         except CaptureError as error:
             self.result = None
             self.use.configure(state="disabled")
+            if self.vision_accept is not None:
+                self.vision_use.configure(state="disabled")
             self.info.set(str(error))
 
     def confirm(self):
@@ -115,6 +131,14 @@ class CropDialog(tk.Toplevel):
                     self.region_accept(self.result, self.image.size, self.image.crop(self.result))
                 else:
                     self.accept(self.image.crop(self.result))
+                self.destroy()
+            except CaptureError as error:
+                self.info.set(str(error))
+
+    def confirm_vision(self):
+        if self.result is not None and self.vision_accept is not None:
+            try:
+                self.vision_accept(self.image.crop(self.result))
                 self.destroy()
             except CaptureError as error:
                 self.info.set(str(error))
@@ -169,6 +193,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         self.auto_copy = tk.BooleanVar(value=preferences["auto_copy"])
         self.active_operation = None
         self.job_started = None
+        self._generation_transcribe_images = False
         self.last_reader_text = None
         self.active_profile = None
         self.style = dict(DEFAULT_STYLE)
@@ -663,10 +688,12 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         before = set(self.root.winfo_children())
         try:
             if ocr:
-                dialog = CropDialog(self.root, image, accept or self.attach_image, instructions="框选聊天消息。确认后先在本机识字，再把文字交给 AI；不向模型上传截图。")
-                dialog.use.configure(text="识字并分析")
+                dialog = CropDialog(self.root, image, accept or self.attach_image, vision_accept=self.analyze_vision_image, instructions="框选聊天消息，再选择：大模型看图会上传选区，需要当前模型和接口支持图片；本机识字只把识别文字交给 AI。两种方式都会分析并生成草稿。")
+                dialog.use.configure(text="本机识字并分析")
             else:
-                CropDialog(self.root, image, accept or self.attach_image)
+                dialog = CropDialog(self.root, image, accept or self.attach_image)
+                if accept == self.analyze_vision_image:
+                    dialog.use.configure(text="大模型看图并分析")
         except Exception:
             for widget in set(self.root.winfo_children()) - before:
                 if isinstance(widget, tk.Toplevel):
@@ -729,7 +756,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
             if not isinstance(image, Image.Image):
                 self.status.set("剪贴板没有截图。请用微信截图或 Win+Shift+S 截取需要的聊天区域。")
                 return
-            self.show_crop(image.convert("RGB"))
+            self.show_crop(image.convert("RGB"), accept=self.analyze_vision_image)
         except Exception:
             self.status.set("无法读取剪贴板截图，请尝试复制聊天文字。")
 
@@ -770,11 +797,12 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
             self.status.set("请点击右上角“AI 设置”填写 API 密钥；只在本次运行保留，不要发在聊天里。")
             return
         reply_count = 1 if self.reply_mode.get().startswith("先给") else 3
+        transcribe_images = bool(self.screenshot)
         try:
             context = self.context.get("1.0", "end-1c")
             # The reader's fixed provenance note is shown in the editor, but
             # not part of the observed message sequence used for overlap merge.
-            if context == self.last_reader_text and context.startswith(("【微信可访问消息文字；", "【本机截图识别；")) and "\n" in context:
+            if context == self.last_reader_text and context.startswith(("【微信可访问消息文字；", "【本机截图识别；", VISION_HEADER)) and "\n" in context:
                 context = context.split("\n", 1)[1]
             history, background = "", ""
             if self.active_profile:
@@ -784,7 +812,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
                 profile = self.memory.profile(self.active_profile)
                 history, background = self.memory.history_text(self.active_profile), profile["background"]
                 context = ""
-            messages = make_messages({"context": context, "history": history, "background": background, "conversation_name": self.active_profile or "", "intent": self.intent.get("1.0", "end-1c"), "relationship": self.relationship.get(), "tone": self.tone.get(), "style": self.style, "images": [self.screenshot] if self.screenshot else [], "reply_count": reply_count, "include_analysis": True})
+            messages = make_messages({"context": context, "history": history, "background": background, "conversation_name": self.active_profile or "", "intent": self.intent.get("1.0", "end-1c"), "relationship": self.relationship.get(), "tone": self.tone.get(), "style": self.style, "images": [self.screenshot] if self.screenshot else [], "reply_count": reply_count, "include_analysis": True, "transcribe_images": transcribe_images})
         except (InputError, ValueError, OSError) as error:
             self.status.set(str(error))
             return
@@ -799,15 +827,19 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         self._next_generation_watch_token = None
         self._next_generation_watch_text = ""
         self.clear_results()
+        self._generation_transcribe_images = transcribe_images
         self.set_busy(True)
         self.job_started = time.monotonic()
-        self.status.set(f"正在结合本次消息、背景和已记录历史分析，生成 {reply_count} 条草稿…")
+        self.status.set(f"正在将选区交给 {config.model} 看图、转写并生成草稿…" if transcribe_images else f"正在结合本次消息、背景和已记录历史分析，生成 {reply_count} 条草稿…")
         events = self.events
         def result(value):
             return {"__watch_token": watch_token, "snapshot_text": watch_text, "result": value} if watch_token is not None else value
         def work():
             try:
-                events.put((True, result(generate(config, messages, reply_count=reply_count, include_analysis=True))))
+                options = {"reply_count": reply_count, "include_analysis": True}
+                if transcribe_images:
+                    options["transcribe_images"] = True
+                events.put((True, result(generate(config, messages, **options))))
             except ServiceError as error:
                 events.put((False, result(str(error))))
             except Exception:
@@ -865,6 +897,9 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
                 self.status.set("自动辅助已暂停，本次在途结果已忽略。")
                 success = None
             if success:
+                vision_note = ""
+                if self._generation_transcribe_images and isinstance(value, dict):
+                    vision_note = self.show_vision_transcript(value.get("screenshot_text", ""))
                 replies = value["replies"] if isinstance(value, dict) else value
                 understanding = value.get("understanding", "本次模型未返回会话理解摘要。") if isinstance(value, dict) else "本次模型未返回会话理解摘要。"
                 self.understanding.configure(state="normal"); self.understanding.delete("1.0", "end")
@@ -880,6 +915,8 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
                 self.status.set(f"已生成 {len(replies)} 条草稿，用时 {seconds:.1f} 秒。请核对 AI 理解后编辑、复制；实际发出后可点“记为已发送”。")
                 if self.auto_copy.get():
                     self.copy_reply(0)
+                if vision_note:
+                    self.status.set(self.status.get() + " " + vision_note)
                 if self.watch.active:
                     self.watch_status.set("自动辅助中 · 草稿已就绪，等待新内容")
             elif success is False:
@@ -890,7 +927,8 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
             pass
         if self.busy and self.active_operation == "generate" and self.job_started is not None:
             seconds = int(time.monotonic() - self.job_started)
-            self.status.set(f"正在等待 AI 分析和回复，已等待 {seconds} 秒；实际用时取决于模型、网络和上下文长度。")
+            task = "大模型看图、转写和生成回复" if self._generation_transcribe_images else "AI 分析和回复"
+            self.status.set(f"正在等待{task}，已等待 {seconds} 秒；实际用时取决于模型、网络和上下文长度。")
         self.automation_tick()
         self.poll_id = self.root.after(80, self.poll)
 

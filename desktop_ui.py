@@ -215,7 +215,7 @@ def build_desktop_ui(app):
     app.capture_button = button(capture_tools, "采集选中窗口", app.capture, style="Soft.TButton", fill="x", expand=True)
     app.screen_button = button(capture_tools, "系统截图", app.system_screenshot, style="Soft.TButton", padx=(5, 0), fill="x", expand=True)
     image_tools = ttk.Frame(tools, style="Card.TFrame"); image_tools.grid(row=3, column=0, sticky="ew", pady=5)
-    button(image_tools, "导入原图（需视觉模型）", app.import_image, style="Quiet.TButton")
+    button(image_tools, "粘贴截图给大模型", app.import_image, style="Quiet.TButton")
     button(image_tools, "移除截图", app.remove_image, style="Quiet.TButton", side="right")
     app.preview = ttk.Label(tools, text="未附加截图（最多 1 张）", style="Muted.Card.TLabel")
     app.preview.grid(row=4, column=0, sticky="w", pady=(0, 7))
@@ -241,7 +241,7 @@ def build_desktop_ui(app):
     source_mode.pack(side="left", padx=8); app.controls.append((source_mode, "readonly"))
     button(mode_row, "重选区域", app.rebind_screenshot, style="Quiet.TButton", side="right")
     file_tools = ttk.Frame(tools, style="Card.TFrame"); file_tools.grid(row=9, column=0, sticky="ew", pady=(6, 0))
-    button(file_tools, "打开截图文件并识字", app.open_screenshot_file, style="Quiet.TButton")
+    button(file_tools, "打开截图文件", app.open_screenshot_file, style="Quiet.TButton")
 
     right.columnconfigure(0, weight=1)
     ttk.Label(right, text="回复工作台", style="Title.Card.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 12))

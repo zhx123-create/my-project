@@ -153,8 +153,11 @@ def make_messages(data):
     tone, relationship = data.get("tone", "自然"), data.get("relationship", "")
     background, history, name = data.get("background", ""), data.get("history", ""), data.get("conversation_name", "")
     reply_count, include_analysis = data.get("reply_count", 3), data.get("include_analysis", False)
+    transcribe_images = data.get("transcribe_images", False)
     if type(reply_count) is not int or reply_count not in (1, 3) or type(include_analysis) is not bool:
         raise InputError("回复数量应为 1 或 3，分析开关应为布尔值。")
+    if type(transcribe_images) is not bool:
+        raise InputError("截图转写开关应为布尔值。")
     if not all(isinstance(x, str) for x in (context, intent, tone, relationship, background, history, name)):
         raise InputError("聊天内容和回复要求必须是文字。")
     if len(context) > 20000 or len(intent) > 1000 or len(relationship) > 100:
@@ -167,6 +170,8 @@ def make_messages(data):
     images = data.get("images", [])
     if not isinstance(images, list) or len(images) > 3:
         raise InputError("最多选择 3 张聊天截图。")
+    if transcribe_images and (not images or not include_analysis):
+        raise InputError("大模型看图需要截图，并启用会话分析。")
     if not context.strip() and not history.strip() and not images:
         raise InputError("请粘贴聊天记录，或选择聊天截图。")
     parts = [{"type": "text", "text": json.dumps({"会话标记": name, "用户填写的背景": background, "已记录的历史": history, "聊天上下文": context, "我的回复意图": intent or "自然地接续聊天", "与对方的关系": relationship or "未说明，请避免假定亲密关系", "语气": TONES[tone], "风格维度": style, "强度含义": {dimension: labels[style[dimension]] for dimension, labels in STYLE_LEVEL_LABELS.items()}}, ensure_ascii=False)}]
@@ -202,12 +207,22 @@ def make_messages(data):
            "不合适时返回空字符串和空数组。只提供主题和关键词，不编造图片地址、出处或声称已找到、下载、发送表情包。"
            "只输出JSON，结构为{\"understanding\":\"简要会话概况\",\"replies\":[{\"label\":\"简短风格标签\",\"text\":\"回复正文\"}],\"meme_hint\":\"表情包主题或空字符串\",\"meme_tags\":[\"关键词\"]}。" if include_analysis else "只输出JSON，结构为{\"replies\":[{\"label\":\"简短风格标签\",\"text\":\"回复正文\"}]}。")
     )
+    if transcribe_images:
+        system += (
+            "本次须直接查看附带的截图，在同一JSON对象中增加 screenshot_text 字符串字段。"
+            "先逐行转写图片里清晰可读的近期聊天消息，再根据这些消息和已有历史生成理解及回复。"
+            "screenshot_text 最多2000字，按画面顺序保留原文和分行，不用概括代替原文；"
+            "看不清的字标注[看不清]，说话者不明时标注未知，不猜测身份，不补写画面以外的消息。"
+            "若无法查看图片或没有可读消息，screenshot_text 必须为空字符串，不可从文字历史编造转写。"
+        )
     return [{"role": "system", "content": system}, {"role": "user", "content": parts}]
 
 
-def generate(config, messages, reply_count=3, include_analysis=False):
+def generate(config, messages, reply_count=3, include_analysis=False, transcribe_images=False):
     if type(reply_count) is not int or reply_count not in (1, 3) or type(include_analysis) is not bool:
         raise InputError("回复数量应为 1 或 3，分析开关应为布尔值。")
+    if type(transcribe_images) is not bool or transcribe_images and not include_analysis:
+        raise InputError("截图转写需要启用会话分析。")
     if not config.key:
         raise ServiceError("尚未配置 AI 服务密钥。请由服务管理员设置 CHAT_API_KEY 后重启。", 503)
     try:
@@ -215,6 +230,8 @@ def generate(config, messages, reply_count=3, include_analysis=False):
     except InputError as error:
         raise ServiceError(str(error), 503) from None
     max_tokens = (400 if include_analysis else 300) if reply_count == 1 else 800
+    if transcribe_images:
+        max_tokens = 4000  # A transcript must not share the short text-only reply budget.
     payload = json.dumps({"model": config.model, "messages": messages, "response_format": {"type": "json_object"}, "temperature": 0.8, "max_tokens": max_tokens}, ensure_ascii=False).encode()
     request = urllib.request.Request(base + "/chat/completions", data=payload, headers={"Authorization": "Bearer " + config.key, "Content-Type": "application/json"}, method="POST")
     opener = _api_opener()
@@ -236,9 +253,19 @@ def generate(config, messages, reply_count=3, include_analysis=False):
             if not isinstance(understanding, str) or not understanding.strip() or len(understanding) > 200:
                 raise ValueError("invalid understanding")
             meme_hint, meme_tags = _meme_suggestion(parsed)
-            return {"understanding": understanding.strip(), "replies": clean, "meme_hint": meme_hint, "meme_tags": meme_tags}
+            analysis = {"understanding": understanding.strip(), "replies": clean, "meme_hint": meme_hint, "meme_tags": meme_tags}
+            if transcribe_images:
+                transcript = parsed.get("screenshot_text")
+                if not isinstance(transcript, str) or len(transcript) > 3000:
+                    raise ServiceError("模型未返回有效的截图文字。请确认当前模型和中转接口支持图片输入，或选择“本机识字并分析”。")
+                if not transcript.strip():
+                    raise ServiceError("模型未识别到截图中的可读消息。请放大并框选清晰文字；也请确认模型和中转接口支持图片输入。")
+                analysis["screenshot_text"] = transcript.strip()
+            return analysis
         return clean
     except urllib.error.HTTPError as exc:
+        if transcribe_images and exc.code in (400, 415):
+            raise ServiceError(f"大模型看图请求被接口拒绝（{exc.code}）。请确认当前模型和中转接口支持 image_url 图片输入及 JSON 输出，或选择“本机识字并分析”。") from None
         messages_by_status = {400: "AI 接口拒绝请求（400）。请核对模型和 JSON 输出支持；截图可改用“截图识字”，先在本机转成文字。", 401: "AI 服务认证失败，请检查服务端密钥。", 403: "AI 服务拒绝访问，请检查模型权限或网络配置。", 404: "AI 接口或模型不存在，请检查服务端配置。", 415: "接口不接受此图片或内容格式。请使用“截图识字”先在本机转为文字。", 429: "AI 服务额度不足或请求过于频繁，请稍后重试。"}
         raise ServiceError(messages_by_status.get(exc.code, "AI 服务返回错误，请检查接口是否支持聊天、图片及 JSON 输出。")) from None
     except (urllib.error.URLError, TimeoutError, OSError):
@@ -295,7 +322,10 @@ class Handler(SimpleHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             messages = make_messages(data)
             include_analysis = data.get("include_analysis", False)
-            result = generate(self.config, messages, reply_count=data.get("reply_count", 3), include_analysis=include_analysis)
+            options = {"reply_count": data.get("reply_count", 3), "include_analysis": include_analysis}
+            if data.get("transcribe_images", False):
+                options["transcribe_images"] = True
+            result = generate(self.config, messages, **options)
             self.send_json(200, result if include_analysis else {"replies": result})
         except (InputError, ValueError, UnicodeDecodeError):
             self.send_json(400, {"error": "输入无效，请检查聊天文字、回复要求和截图格式。"})

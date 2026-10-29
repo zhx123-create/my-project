@@ -1,4 +1,7 @@
 import gc
+import base64
+import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -6,6 +9,7 @@ import time
 import tkinter as tk
 from types import SimpleNamespace
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from PIL import Image
@@ -110,6 +114,57 @@ class ScreenshotFlowTests(unittest.TestCase):
         self.assertFalse(self.app.watch.active)
         self.assertFalse(self.app._watch_start_requested)
         model.assert_not_called()
+
+    def test_pasted_screenshot_can_go_directly_to_model_then_become_context(self):
+        content = {**self.result, 'screenshot_text': '未知：周五有空吗？\n未知：我看一下安排。'}
+        upstream = {'choices': [{'message': {'content': json.dumps(content)}}]}
+        with patch('desktop_screenshots.ImageGrab.grabclipboard', return_value=self.image), patch('desktop_screenshots.recognize_image') as ocr, patch('server.urllib.request.OpenerDirector.open', side_effect=lambda *a, **k: io.BytesIO(json.dumps(upstream).encode())) as opened:
+            self.app.paste_screenshot()
+            dialog = next(widget for widget in self.root.winfo_children() if isinstance(widget, CropDialog))
+            self.assertIn('disabled', dialog.vision_use.state())
+            opened.assert_not_called()
+            dialog.begin(SimpleNamespace(x=20, y=20)); dialog.drag(SimpleNamespace(x=220, y=160))
+            dialog.vision_use.invoke(); self.settle()
+            opened.assert_called_once(); ocr.assert_not_called()
+            payload = json.loads(opened.call_args.args[0].data)
+            image_url = payload['messages'][1]['content'][1]['image_url']['url']
+            with Image.open(io.BytesIO(base64.b64decode(image_url.split(',', 1)[1]))) as sent:
+                self.assertEqual(sent.size, (200, 140), 'only the approved crop is sent')
+            self.assertIn('screenshot_text', payload['messages'][0]['content'])
+            self.assertIn(content['screenshot_text'], self.app.context.get('1.0', 'end-1c'))
+            self.assertIn('周五有空', self.app.memory.history_text('朋友'))
+            self.assertNotIn('大模型截图转写', self.app.memory.history_text('朋友'))
+            self.assertIsNone(self.app.screenshot)
+            self.app.generate_from_editor(); self.settle()
+            followup = json.loads(opened.call_args.args[0].data)
+            self.assertEqual(len(followup['messages'][1]['content']), 1, 'follow-up should reuse text without uploading the screenshot again')
+            self.assertEqual(self.app.memory.history_text('朋友').count('周五有空'), 1)
+
+    def test_vision_failure_does_not_display_drafts_or_invent_history(self):
+        error = urllib.error.HTTPError('https://api.openai.com', 400, 'private upstream error', {}, None)
+        with patch('server.urllib.request.OpenerDirector.open', side_effect=error), patch('desktop_screenshots.recognize_image') as ocr:
+            self.app.analyze_vision_image(self.image); self.settle()
+        ocr.assert_not_called()
+        self.assertIn('image_url', self.app.status.get())
+        self.assertNotIn('private upstream', self.app.status.get())
+        self.assertEqual(self.app.memory.history_text('朋友'), '')
+        self.assertEqual(self.app.reply_texts[0].get('1.0', 'end-1c'), '')
+
+    def test_vision_without_transcript_does_not_claim_to_have_read_image(self):
+        upstream = {'choices': [{'message': {'content': json.dumps(self.result)}}]}
+        with patch('server.urllib.request.OpenerDirector.open', return_value=io.BytesIO(json.dumps(upstream).encode())):
+            self.app.analyze_vision_image(self.image); self.settle()
+        self.assertIn('模型未返回有效的截图文字', self.app.status.get())
+        self.assertEqual(self.app.memory.history_text('朋友'), '')
+        self.assertEqual(self.app.reply_texts[0].get('1.0', 'end-1c'), '')
+
+    def test_cancel_screenshot_choice_uploads_nothing(self):
+        with patch('desktop_screenshots.ImageGrab.grabclipboard', return_value=self.image), patch('server.urllib.request.OpenerDirector.open') as opened, patch('desktop_screenshots.recognize_image') as ocr:
+            self.app.paste_screenshot()
+            dialog = next(widget for widget in self.root.winfo_children() if isinstance(widget, CropDialog))
+            dialog.cancel()
+        opened.assert_not_called(); ocr.assert_not_called()
+        self.assertIsNone(self.app.screenshot)
 
 
 if __name__ == '__main__':
