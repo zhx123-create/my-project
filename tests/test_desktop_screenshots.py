@@ -146,6 +146,7 @@ class ScreenshotFlowTests(unittest.TestCase):
             self.app.analyze_vision_image(self.image); self.settle()
         ocr.assert_not_called()
         self.assertIn('image_url', self.app.status.get())
+        self.assertIn('image_url', self.app.understanding.get('1.0', 'end-1c'))
         self.assertNotIn('private upstream', self.app.status.get())
         self.assertEqual(self.app.memory.history_text('朋友'), '')
         self.assertEqual(self.app.reply_texts[0].get('1.0', 'end-1c'), '')

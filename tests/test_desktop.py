@@ -443,6 +443,36 @@ class DesktopTests(unittest.TestCase):
             self.assertTrue(finished.wait(2))
             self.root.update()
 
+    def test_image_probe_is_explicit_and_does_not_submit_current_chat(self):
+        self.app.key.set('test-only-key')
+        self.app.context.insert('1.0', '这是一段不应进入接口测试的私聊。')
+        self.app.show_settings()
+        with patch('desktop.check_vision', return_value=True) as vision, patch('desktop.test_connection') as models, patch('desktop.generate') as generate:
+            vision.assert_not_called()
+            self.app.api_vision_test_button.invoke()
+            deadline = time.monotonic() + 2
+            while 'disabled' in self.app.api_vision_test_button.state() and time.monotonic() < deadline:
+                self.root.update(); time.sleep(0.01)
+        vision.assert_called_once_with(self.app.current_api_config())
+        models.assert_not_called(); generate.assert_not_called()
+        self.assertIn('图片测试通过', self.app.api_probe_note.get())
+        self.assertIn('不应进入接口测试', self.app.context.get('1.0', 'end-1c'))
+        self.assertIsNone(self.app.screenshot)
+
+    def test_image_probe_failure_is_distinct_from_a_reachable_model_list(self):
+        self.app.key.set('test-only-key')
+        self.app.show_settings()
+        with patch('desktop.test_connection', return_value=[self.app.model.get()]), patch('desktop.check_vision', side_effect=ServiceError('图片输入被接口拒绝（400）')):
+            for button in (self.app.api_test_button, self.app.api_vision_test_button):
+                button.invoke()
+                deadline = time.monotonic() + 2
+                while 'disabled' in button.state() and time.monotonic() < deadline:
+                    self.root.update(); time.sleep(0.01)
+                if button == self.app.api_test_button:
+                    self.assertIn('尚未验证生成或图片识别', self.app.api_probe_note.get())
+        self.assertIn('图片输入被接口拒绝', self.app.api_probe_note.get())
+        self.assertNotIn('disabled', self.app.api_vision_test_button.state())
+
     def test_local_meme_picker_receives_theme_without_an_extra_model_request(self):
         self.app.update_meme_suggestions({'meme_hint': '夸张无语', 'meme_tags': ['无语']})
         with patch('desktop.MemePicker') as picker, patch('desktop.generate') as generate:
