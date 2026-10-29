@@ -233,6 +233,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         use_saved_endpoint = has_saved_settings and not self.config.key
         self.base = tk.StringVar(value=preferences["base"] if use_saved_endpoint else self.config.base)
         self.model = tk.StringVar(value=preferences["model"] if use_saved_endpoint else self.config.model)
+        self.max_output_tokens = tk.StringVar(value=str(preferences["max_output_tokens"]))
         self.allow_http = tk.BooleanVar(value=preferences["allow_http"] if use_saved_endpoint else self.config.allow_http)
         self._http_approved_base = self.base.get().strip().rstrip("/")
         def reset_http(*_args):
@@ -565,25 +566,27 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         dialog.configure(background="#f5f6fb")
         dialog.title("AI 设置")
         dialog.transient(self.root); dialog.columnconfigure(1, weight=1)
-        dialog.geometry("650x480")
+        dialog.geometry("650x520")
         for row, (label, variable) in enumerate((("API 密钥", self.key), ("接口地址", self.base), ("模型", self.model))):
             ttk.Label(dialog, text=label).grid(row=row, column=0, sticky="w", padx=12, pady=8)
             entry = ttk.Combobox(dialog, textvariable=variable) if row == 2 else ttk.Entry(dialog, textvariable=variable, show="•" if row == 0 else "")
             entry.grid(row=row, column=1, sticky="ew", padx=(0, 12), pady=8)
             if row == 2:
                 self.api_model_box = entry
+        ttk.Label(dialog, text="输出上限（tokens）").grid(row=3, column=0, sticky="w", padx=12, pady=8)
+        ttk.Combobox(dialog, textvariable=self.max_output_tokens, values=[512, 1024, 2048, 4096, 8192, 16384], state="readonly").grid(row=3, column=1, sticky="ew", padx=(0, 12), pady=8)
         self.api_http_checkbox = ttk.Checkbutton(dialog, text="允许此 HTTP 地址（密钥和聊天内容将明文传输）", variable=self.allow_http)
-        self.api_http_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", padx=12, pady=5)
+        self.api_http_checkbox.grid(row=4, column=0, columnspan=2, sticky="w", padx=12, pady=5)
         remember = ttk.Checkbutton(dialog, text="在这台电脑记住密钥（使用当前 Windows 用户加密）", variable=self.remember_key)
-        remember.grid(row=4, column=0, columnspan=2, sticky="w", padx=12, pady=5)
+        remember.grid(row=5, column=0, columnspan=2, sticky="w", padx=12, pady=5)
         if not supports_secure_storage() or self.settings.path is None:
             remember.configure(state="disabled")
             self.remember_key.set(False)
         explanation = "接口和模型会记住。密钥默认仅本次运行使用；勾选后加密保存在本机。" if self.settings.path is not None else "当前仅在本次运行保留设置；本地设置文件未能使用时不会覆盖原文件。"
-        ttk.Label(dialog, text=explanation + "\n获取模型列表只验证连通性。测试图片识别会调用 AI，可能计费；只发送随机合成测试图，不发送你的聊天。", wraplength=600).grid(row=5, column=0, columnspan=2, sticky="w", padx=12, pady=8)
+        ttk.Label(dialog, text=explanation + "\n模型输出被截断时可提高输出上限；带思考模型可能将额度用于思考。实际费用按服务商规则计算。\n获取模型列表只验证连通性。测试图片识别会调用 AI，可能计费；只发送随机合成测试图，不发送你的聊天。", wraplength=600).grid(row=6, column=0, columnspan=2, sticky="w", padx=12, pady=8)
         note = tk.StringVar(dialog)
         self.api_probe_note = note
-        ttk.Label(dialog, textvariable=note, wraplength=600, foreground="#7250b5").grid(row=6, column=0, columnspan=2, sticky="w", padx=12)
+        ttk.Label(dialog, textvariable=note, wraplength=600, foreground="#7250b5").grid(row=7, column=0, columnspan=2, sticky="w", padx=12)
         results = queue.Queue()
         probe = {"closed": False, "after": None, "busy": False, "kind": "models", "started": None, "models_verified": None, "vision_verified": None}
         def cleanup(event=None):
@@ -657,7 +660,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
             probe["after"] = self.root.after(80, lambda: poll_probe(config))
         def finish():
             try:
-                self.settings.set_api(base=self.base.get().strip(), model=self.model.get().strip(), key=self.key.get().strip(), remember=self.remember_key.get(), allow_http=self.allow_http.get())
+                self.settings.set_api(base=self.base.get().strip(), model=self.model.get().strip(), key=self.key.get().strip(), remember=self.remember_key.get(), allow_http=self.allow_http.get(), max_output_tokens=self.current_api_config().max_output_tokens)
             except (ValueError, OSError) as error:
                 note.set(str(error)); return
             config = self.current_api_config()
@@ -681,7 +684,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
                 self.stop_watch("已取消配置")
             dialog.destroy()
         actions = ttk.Frame(dialog)
-        actions.grid(row=7, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 10))
+        actions.grid(row=8, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 10))
         self.api_test_button = ttk.Button(actions, text="获取模型列表", command=test_api)
         self.api_test_button.pack(side="left")
         self.api_vision_test_button = ttk.Button(actions, text="测试图片识别", command=lambda: test_api("vision"))
@@ -691,7 +694,11 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         dialog.grab_set()
 
     def current_api_config(self):
-        return Config(self.key.get().strip(), self.base.get().strip().rstrip("/"), self.model.get().strip(), self.allow_http.get())
+        try:
+            output_limit = int(self.max_output_tokens.get())
+        except ValueError:
+            output_limit = 0
+        return Config(self.key.get().strip(), self.base.get().strip().rstrip("/"), self.model.get().strip(), self.allow_http.get(), output_limit)
 
     def refresh_windows(self):
         if self.busy:
@@ -977,10 +984,10 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
                 self.status.set(value)
                 if self._generation_transcribe_images:
                     self.capture_status.set("大模型看图未完成，完整提示显示在右侧“AI 理解”中，可选中复制。")
-                    self.understanding.configure(state="normal")
-                    self.understanding.delete("1.0", "end")
-                    self.understanding.insert("1.0", "截图分析未完成：\n" + value)
-                    self.understanding.configure(state="disabled")
+                self.understanding.configure(state="normal")
+                self.understanding.delete("1.0", "end")
+                self.understanding.insert("1.0", ("截图分析未完成：\n" if self._generation_transcribe_images else "生成未完成：\n") + value)
+                self.understanding.configure(state="disabled")
                 if watch_token is not None:
                     self.stop_watch("AI 请求失败，请检查设置后重新开启")
         except queue.Empty:

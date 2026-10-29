@@ -15,7 +15,7 @@ from server import normalize_api_base
 _SCHEMA = "jiehua.desktop-settings"
 _MAX_BYTES = 16 * 1024
 _DEFAULTS = {"base": "https://api.openai.com/v1", "model": "gpt-4.1-mini", "allow_http": False,
-             "auto_copy": False, "watch_interval": 10, "last_profile": "", "capture_source": "窗口文字"}
+             "auto_copy": False, "watch_interval": 10, "last_profile": "", "capture_source": "窗口文字", "max_output_tokens": 4096}
 
 
 def supports_secure_storage() -> bool:
@@ -83,6 +83,8 @@ def _values(raw):
         raise ValueError("自动复制开关必须为布尔值。")
     if type(result["watch_interval"]) is not int or result["watch_interval"] not in (5, 10, 20, 30):
         raise ValueError("检查间隔请选择 5、10、20 或 30 秒。")
+    if type(result["max_output_tokens"]) is not int or not 512 <= result["max_output_tokens"] <= 16384:
+        raise ValueError("输出上限应为 512 至 16384 的整数。")
     return result
 
 
@@ -125,10 +127,13 @@ class DesktopSettings:
         self._save(values, self._encrypted_key)
         self._values = values
 
-    def set_api(self, base: str, model: str, key: str, remember: bool, allow_http: bool = False):
+    def set_api(self, base: str, model: str, key: str, remember: bool, allow_http: bool = False, max_output_tokens=None):
         if type(remember) is not bool:
             raise ValueError("记住密钥开关必须为布尔值。")
-        values = _values({**self._values, "base": base, "model": model, "allow_http": allow_http})
+        fields = {"base": base, "model": model, "allow_http": allow_http}
+        if max_output_tokens is not None:
+            fields["max_output_tokens"] = max_output_tokens
+        values = _values({**self._values, **fields})
         key = _plain(key, 4096, "API 密钥", empty=not remember)
         encrypted = ""
         if remember:

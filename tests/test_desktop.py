@@ -1,4 +1,5 @@
 import gc
+import io
 import json
 import os
 from pathlib import Path
@@ -525,6 +526,21 @@ class DesktopTests(unittest.TestCase):
                     self.assertIn('尚未验证生成或图片识别', self.app.api_probe_note.get())
         self.assertIn('图片输入被接口拒绝', self.app.api_probe_note.get())
         self.assertNotIn('disabled', self.app.api_vision_test_button.state())
+
+    def test_saved_output_limit_reaches_generation_and_format_errors_are_copyable(self):
+        self.app.key.set('test-only-key')
+        self.app.show_settings()
+        self.app.max_output_tokens.set('8192')
+        self.app.settings_dialog.destroy()
+        self.app.remember_ui_preferences()
+        self.assertEqual(self.app.settings.values()['max_output_tokens'], 8192)
+        self.app.context.insert('1.0', '未知：周五几点见？')
+        upstream = {'choices': [{'finish_reason': 'length', 'message': {'content': '{"replies":', 'reasoning_content': 'private chain'}}]}
+        with patch('server.urllib.request.OpenerDirector.open', return_value=io.BytesIO(json.dumps(upstream).encode())) as opened:
+            self.app.generate_from_editor(); self.wait_for_job()
+        self.assertEqual(json.loads(opened.call_args.args[0].data)['max_tokens'], 8192)
+        self.assertIn('被截断', self.app.understanding.get('1.0', 'end-1c'))
+        self.assertNotIn('private chain', self.app.understanding.get('1.0', 'end-1c'))
 
     def test_local_meme_picker_receives_theme_without_an_extra_model_request(self):
         self.app.update_meme_suggestions({'meme_hint': '夸张无语', 'meme_tags': ['无语']})

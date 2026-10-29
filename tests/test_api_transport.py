@@ -1,8 +1,11 @@
 import io
+import errno
+import http.client
 import json
 import os
 from pathlib import Path
 import ssl
+import socket
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -81,6 +84,50 @@ class ApiTransportTests(unittest.TestCase):
         with patch('server.urllib.request.OpenerDirector.open', return_value=io.BytesIO(b'not-json-secret')):
             with self.assertRaisesRegex(server.ServiceError, '模型列表'):
                 server.test_connection(self.config)
+
+    def test_network_reasons_are_distinct_and_do_not_echo_private_error_details(self):
+        cases = [
+            (TimeoutError('private-details'), '超时'),
+            (socket.gaierror(-2, 'private-details'), 'DNS'),
+            (ConnectionRefusedError(errno.ECONNREFUSED, 'private-details'), '拒绝'),
+            (ConnectionResetError(errno.ECONNRESET, 'private-details'), '断开'),
+            (ssl.SSLCertVerificationError('private-details'), '证书'),
+            (ssl.SSLError('private-details'), '安全连接'),
+            (OSError(errno.ENETUNREACH, 'private-details'), '无法到达'),
+            (http.client.RemoteDisconnected('private-details'), '断开'),
+            (http.client.IncompleteRead(b'private-details', 42), '未完整接收'),
+            (urllib.error.URLError('private-details'), '暂时无法连接'),
+        ]
+        for reason, expected in cases:
+            for wrapped in (reason, urllib.error.URLError(reason)):
+                for action in (server.test_connection, lambda config: server.generate(config, [], reply_count=1)):
+                    with self.subTest(reason=type(reason).__name__, wrapped=isinstance(wrapped, urllib.error.URLError), action=action), patch('server.urllib.request.OpenerDirector.open', side_effect=wrapped) as opened:
+                        with self.assertRaises(server.ServiceError) as raised:
+                            action(self.config)
+                    self.assertIn(expected, str(raised.exception))
+                    self.assertNotIn('private-details', str(raised.exception))
+                    self.assertNotIn('test-only-key', str(raised.exception))
+                    opened.assert_called_once()
+
+    def test_windows_socket_codes_are_classified_without_localized_error_strings(self):
+        for code, expected in ((10060, '超时'), (10061, '拒绝'), (10054, '断开'), (10065, '无法到达')):
+            reason = OSError('private-details')
+            reason.winerror = code
+            with self.subTest(code=code), patch('server.urllib.request.OpenerDirector.open', side_effect=urllib.error.URLError(reason)):
+                with self.assertRaises(server.ServiceError) as raised:
+                    server.generate(self.config, [], reply_count=1)
+            self.assertIn(expected, str(raised.exception))
+            self.assertNotIn('private-details', str(raised.exception))
+
+    def test_gateway_error_includes_status_and_is_never_automatically_retried(self):
+        for code in (408, 413, 500, 502, 503, 504):
+            error = urllib.error.HTTPError(self.base, code, 'private-details', {}, None)
+            with self.subTest(code=code), patch('server.urllib.request.OpenerDirector.open', side_effect=error) as opened:
+                with self.assertRaises(server.ServiceError) as raised:
+                    server.generate(self.config, [], reply_count=1)
+            self.assertIn(str(code), str(raised.exception))
+            self.assertNotIn('private-details', str(raised.exception))
+            opened.assert_called_once()
 
     def test_settings_http_opt_in_is_paired_with_its_address(self):
         settings = DesktopSettings()

@@ -158,7 +158,8 @@ class GenerationTests(unittest.TestCase):
             result = server.generate(self.config, server.make_messages({'context': '周五能交吗？', 'reply_count': 1, 'include_analysis': True}), reply_count=1, include_analysis=True)
         self.assertEqual(result, {**expected, 'meme_hint': '', 'meme_tags': []})
         payload = json.loads(opened.call_args.args[0].data)
-        self.assertLessEqual(payload['max_tokens'], 400)
+        self.assertEqual(payload['max_tokens'], self.config.max_output_tokens)
+        self.assertFalse(payload['stream'])
 
     def test_one_reply_default_return_remains_a_list(self):
         replies = [{'label': '自然', 'text': '好的，我们周五确认。'}]

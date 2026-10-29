@@ -42,6 +42,20 @@ class DesktopSettingsTests(unittest.TestCase):
         if settings.os.name != "nt":
             self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
+    def test_output_limit_persists_and_old_settings_get_a_usable_default(self):
+        subject = DesktopSettings(self.path)
+        subject.set_api('https://api.example.com/v1', 'model', '', False, max_output_tokens=8192)
+        self.assertEqual(DesktopSettings(self.path).values()['max_output_tokens'], 8192)
+        raw = self.path.read_bytes()
+        for limit in (True, 0, 16385, '4096'):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                subject.update(max_output_tokens=limit)
+            self.assertEqual(self.path.read_bytes(), raw)
+        legacy = json.loads(raw)
+        legacy['values'].pop('max_output_tokens')
+        self.path.write_text(json.dumps(legacy), encoding='utf-8')
+        self.assertEqual(DesktopSettings(self.path).values()['max_output_tokens'], 4096)
+
     def test_plaintext_key_is_never_saved_when_remember_is_off(self):
         subject = DesktopSettings(self.path)
         subject.set_api("https://api.example.com/v1/", "custom-model", "private-test-key", False)

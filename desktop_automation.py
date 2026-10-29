@@ -222,7 +222,7 @@ class AutomationMixin:
                 self.watch.interval = self.watch_interval.get()
                 self.watch.mark_check(time.monotonic())
                 self.watch_status.set(f"自动辅助中 · 每 {self.watch.interval} 秒检查")
-            fields = {"auto_copy": self.auto_copy.get(), "watch_interval": self.watch_interval.get(), "last_profile": self.active_profile if self.memory.persistent and self.active_profile else "", "capture_source": self.capture_source.get()}
+            fields = {"auto_copy": self.auto_copy.get(), "watch_interval": self.watch_interval.get(), "last_profile": self.active_profile if self.memory.persistent and self.active_profile else "", "capture_source": self.capture_source.get(), "max_output_tokens": self.current_api_config().max_output_tokens}
             # An encrypted key stays paired with the endpoint chosen when it
             # was explicitly saved. Runtime environment credentials may differ.
             if not self.settings.values()["remember_key"]:
