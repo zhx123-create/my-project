@@ -1,10 +1,20 @@
-"""Test the actual screenshot workflow with a synthetic image, never chats."""
+"""Test generation workflows with synthetic inputs, never user chats."""
 import secrets
 
 from PIL import Image, ImageDraw, ImageFont
 
 from server import ServiceError, generate, make_messages
 from windows_capture import image_payload
+
+
+def check_text(config):
+    messages = make_messages({
+        "context": "对方：周五下午三点开会，收到请确认。",
+        "intent": "这是虚构的文字生成测试。简短确认收到会议时间，不补充事实；表情建议为空。",
+        "reply_count": 1, "include_analysis": True,
+    })
+    generate(config, messages, reply_count=1, include_analysis=True)
+    return True
 
 
 def check_vision(config):

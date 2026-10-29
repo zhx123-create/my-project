@@ -130,7 +130,7 @@ def test_connection(config):
                 result.append(name)
         return result
     except urllib.error.HTTPError as error:
-        messages = {401: "密钥认证失败（401），请检查该服务商提供的密钥。", 403: "服务拒绝访问（403），请检查密钥权限或网络限制。", 404: "该接口未提供 /models 模型列表；仍可保存设置后尝试生成。", 429: "服务请求受限（429），请检查额度或稍后再试。"}
+        messages = {401: "密钥认证失败（401），请检查该服务商提供的密钥。", 403: "模型列表请求被接口或中间代理拒绝（HTTP 403）。请向服务商核对密钥权限、来源 IP 和访问规则；该结果不能单独判断生成或看图能力。", 404: "该接口未提供 /models 模型列表；仍可保存设置后尝试生成。", 429: "服务请求受限（429），请检查额度或稍后再试。"}
         raise ServiceError(messages.get(error.code, f"接口返回 HTTP {error.code}。请确认地址；测试不会跟随携带密钥的重定向。")) from None
     except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
         raise ServiceError(_network_message(error)) from None
@@ -348,9 +348,18 @@ def generate(config, messages, reply_count=3, include_analysis=False, transcribe
             return analysis
         return clean
     except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            has_images = transcribe_images or any(
+                isinstance(message, dict) and isinstance(message.get("content"), list)
+                and any(isinstance(part, dict) and part.get("type") == "image_url" for part in message["content"])
+                for message in messages
+            )
+            if has_images:
+                raise ServiceError("看图请求被接口或中间代理拒绝（HTTP 403）。若文字生成可用，请向服务商确认当前模型的 image_url 图片权限及图片请求限制；可先改用“本机识字并分析”，只向 AI 提交文字。") from None
+            raise ServiceError("文字生成请求被接口或中间代理拒绝（HTTP 403）。请向服务商核对密钥和模型权限、来源 IP 及访问规则；仅凭此状态不能确定具体原因。") from None
         if transcribe_images and exc.code in (400, 415):
             raise ServiceError(f"大模型看图请求被接口拒绝（{exc.code}）。请确认当前模型和中转接口支持 image_url 图片输入、JSON 输出及所选输出上限，或选择“本机识字并分析”。") from None
-        messages_by_status = {400: "AI 接口拒绝请求（400）。请核对模型和 JSON 输出支持；截图可改用“本机识字并分析”。", 401: "AI 服务认证失败，请检查服务端密钥。", 403: "AI 服务拒绝访问，请检查模型权限或网络配置。", 404: "AI 接口或模型不存在，请检查服务端配置。", 408: "AI 接口返回请求超时（408），请稍后手动重试。", 413: "AI 接口拒绝过大的请求（413），请减少截图或聊天内容后重试。", 415: "接口不接受此图片或内容格式。请使用“本机识字并分析”先在本机转为文字。", 429: "AI 服务额度不足或请求过于频繁，请稍后重试。", 500: "AI 服务内部错误（500），请稍后重试或联系服务商。", 502: "AI 中转服务未能取得上游响应（502），请稍后重试或联系服务商。", 503: "AI 服务暂时不可用（503），请稍后重试或联系服务商。", 504: "AI 中转服务等待上游超时（504），请稍后重试或联系服务商。"}
+        messages_by_status = {400: "AI 接口拒绝请求（400）。请核对模型和 JSON 输出支持；截图可改用“本机识字并分析”。", 401: "AI 服务认证失败，请检查服务端密钥。", 404: "AI 接口或模型不存在，请检查服务端配置。", 408: "AI 接口返回请求超时（408），请稍后手动重试。", 413: "AI 接口拒绝过大的请求（413），请减少截图或聊天内容后重试。", 415: "接口不接受此图片或内容格式。请使用“本机识字并分析”先在本机转为文字。", 429: "AI 服务额度不足或请求过于频繁，请稍后重试。", 500: "AI 服务内部错误（500），请稍后重试或联系服务商。", 502: "AI 中转服务未能取得上游响应（502），请稍后重试或联系服务商。", 503: "AI 服务暂时不可用（503），请稍后重试或联系服务商。", 504: "AI 中转服务等待上游超时（504），请稍后重试或联系服务商。"}
         raise ServiceError(messages_by_status.get(exc.code, "AI 服务返回错误，请检查接口是否支持聊天、图片及 JSON 输出。")) from None
     except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
         raise ServiceError(_network_message(error)) from None

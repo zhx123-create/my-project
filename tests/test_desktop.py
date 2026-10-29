@@ -513,6 +513,51 @@ class DesktopTests(unittest.TestCase):
         self.assertIn('不应进入接口测试', self.app.context.get('1.0', 'end-1c'))
         self.assertIsNone(self.app.screenshot)
 
+    def test_text_probe_is_explicit_serialized_and_leaves_current_chat_untouched(self):
+        gate, finished = threading.Event(), threading.Event()
+        self.app.key.set('test-only-key')
+        self.app.context.insert('1.0', '不应进入测试的私人聊天。')
+        self.app.memory.add_context('已有会话', '不应进入测试的私人历史。')
+        previous_memory = self.app.memory.profile('已有会话')
+        self.app.show_settings()
+        def delayed(_config):
+            gate.wait(2); finished.set(); return True
+        with patch('desktop.check_text', side_effect=delayed) as text, patch('desktop.check_vision') as vision, patch('desktop.test_connection') as models:
+            text.assert_not_called()
+            self.app.api_text_test_button.invoke()
+            for button in (self.app.api_test_button, self.app.api_text_test_button, self.app.api_vision_test_button):
+                self.assertIn('disabled', button.state())
+                button.invoke()
+            gate.set()
+            self.assertTrue(finished.wait(2))
+            deadline = time.monotonic() + 2
+            while 'disabled' in self.app.api_text_test_button.state() and time.monotonic() < deadline:
+                self.root.update(); time.sleep(0.01)
+            text.assert_called_once_with(self.app.current_api_config())
+            vision.assert_not_called(); models.assert_not_called()
+        self.assertIn('文字测试通过', self.app.api_probe_note.get())
+        self.assertIn('一次成功不保证持续稳定', self.app.api_probe_note.get())
+        self.assertEqual(self.app.context.get('1.0', 'end-1c'), '不应进入测试的私人聊天。')
+        self.assertEqual(self.app.memory.names(), ['已有会话'])
+        self.assertEqual(self.app.memory.profile('已有会话'), previous_memory)
+
+    def test_text_probe_result_is_invalidated_when_model_changes(self):
+        gate, finished = threading.Event(), threading.Event()
+        self.app.key.set('test-only-key')
+        self.app.show_settings()
+        def delayed(_config):
+            gate.wait(2); finished.set(); return True
+        with patch('desktop.check_text', side_effect=delayed):
+            self.app.api_text_test_button.invoke()
+            self.app.model.set('different-model')
+            gate.set()
+            self.assertTrue(finished.wait(2))
+            deadline = time.monotonic() + 2
+            while 'disabled' in self.app.api_text_test_button.state() and time.monotonic() < deadline:
+                self.root.update(); time.sleep(0.01)
+        self.assertIn('设置已改变', self.app.api_probe_note.get())
+        self.assertNotIn('测试通过', self.app.api_probe_note.get())
+
     def test_image_probe_failure_is_distinct_from_a_reachable_model_list(self):
         self.app.key.set('test-only-key')
         self.app.show_settings()

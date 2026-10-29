@@ -24,7 +24,7 @@ from meme_library import MemeLibrary
 from meme_picker import MemePicker
 from windows_capture import CaptureError, capture_window_isolated, crop_box, image_payload, list_windows
 from wechat_reader import read_conversation
-from vision_probe import check_vision
+from vision_probe import check_text, check_vision
 
 FONT_FAMILY = "Microsoft YaHei UI" if sys.platform == "win32" else "Noto Sans CJK SC"
 TEMP_CONVERSATION = "临时会话（不记忆）"
@@ -566,7 +566,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         dialog.configure(background="#f5f6fb")
         dialog.title("AI 设置")
         dialog.transient(self.root); dialog.columnconfigure(1, weight=1)
-        dialog.geometry("650x520")
+        dialog.geometry("650x540")
         for row, (label, variable) in enumerate((("API 密钥", self.key), ("接口地址", self.base), ("模型", self.model))):
             ttk.Label(dialog, text=label).grid(row=row, column=0, sticky="w", padx=12, pady=8)
             entry = ttk.Combobox(dialog, textvariable=variable) if row == 2 else ttk.Entry(dialog, textvariable=variable, show="•" if row == 0 else "")
@@ -583,12 +583,12 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
             remember.configure(state="disabled")
             self.remember_key.set(False)
         explanation = "接口和模型会记住。密钥默认仅本次运行使用；勾选后加密保存在本机。" if self.settings.path is not None else "当前仅在本次运行保留设置；本地设置文件未能使用时不会覆盖原文件。"
-        ttk.Label(dialog, text=explanation + "\n模型输出被截断时可提高输出上限；带思考模型可能将额度用于思考。实际费用按服务商规则计算。\n获取模型列表只验证连通性。测试图片识别会调用 AI，可能计费；只发送随机合成测试图，不发送你的聊天。", wraplength=600).grid(row=6, column=0, columnspan=2, sticky="w", padx=12, pady=8)
+        ttk.Label(dialog, text=explanation + "\n模型输出被截断时可提高输出上限；带思考模型可能将额度用于思考。实际费用按服务商规则计算。\n获取模型列表只检查该查询。文字和图片测试各调用 AI 一次，可能计费；只发送虚构测试文字或合成图，不发送你的聊天。一次通过不保证持续稳定。", wraplength=600).grid(row=6, column=0, columnspan=2, sticky="w", padx=12, pady=8)
         note = tk.StringVar(dialog)
         self.api_probe_note = note
         ttk.Label(dialog, textvariable=note, wraplength=600, foreground="#7250b5").grid(row=7, column=0, columnspan=2, sticky="w", padx=12)
         results = queue.Queue()
-        probe = {"closed": False, "after": None, "busy": False, "kind": "models", "started": None, "models_verified": None, "vision_verified": None}
+        probe = {"closed": False, "after": None, "busy": False, "kind": "models", "started": None, "models_verified": None, "text_verified": None, "vision_verified": None}
         def cleanup(event=None):
             if event is not None and event.widget is not dialog:
                 return
@@ -604,13 +604,15 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
             try:
                 success, value = results.get_nowait()
             except queue.Empty:
-                if probe["kind"] == "vision":
+                if probe["kind"] in ("text", "vision"):
                     elapsed = int(time.monotonic() - probe["started"])
-                    note.set(f"正在测试图片识别，已等待 {elapsed} 秒；只发送合成测试图，不发送聊天。")
+                    kind_label = "图片识别" if probe["kind"] == "vision" else "文字生成"
+                    note.set(f"正在测试{kind_label}，已等待 {elapsed} 秒；不发送你的聊天。")
                 probe["after"] = self.root.after(80, lambda: poll_probe(config))
                 return
             probe["busy"] = False
             self.api_test_button.configure(state="normal", text="获取模型列表")
+            self.api_text_test_button.configure(state="normal", text="测试文字生成")
             self.api_vision_test_button.configure(state="normal", text="测试图片识别")
             if config != self.current_api_config():
                 note.set("设置已改变，请重新测试当前接口。")
@@ -619,6 +621,9 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
             elif probe["kind"] == "vision":
                 probe["vision_verified"] = config
                 note.set("图片测试通过：当前模型正确读出了随机测试图，并完成截图分析的返回流程。聊天截图仍需核对识别效果。")
+            elif probe["kind"] == "text":
+                probe["text_verified"] = config
+                note.set("文字测试通过：本次请求已返回有效会话摘要和回复草稿。图片能力需单独测试；一次成功不保证持续稳定。")
             else:
                 self.api_model_box.configure(values=value)
                 exact = [name for name in value if name.casefold() == config.model.casefold()]
@@ -638,24 +643,26 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
                 normalize_api_base(config.base, config.allow_http)
                 if not config.key:
                     raise InputError("请先填写 API 密钥，再测试接口。")
-                if kind == "vision" and not config.model:
-                    raise InputError("请先填写模型 ID，再测试图片识别。")
+                if kind in ("text", "vision") and not config.model:
+                    raise InputError("请先填写模型 ID，再测试生成或图片识别。")
             except InputError as error:
                 note.set(str(error)); return
             probe["busy"] = True
             probe["kind"], probe["started"] = kind, time.monotonic()
-            if kind == "vision":
-                probe["vision_verified"] = None
-            note.set("正在测试图片识别：只发送随机合成测试图…" if kind == "vision" else "正在获取接口的模型列表…")
+            if kind in ("text", "vision"):
+                probe[kind + "_verified"] = None
+            note.set({"vision": "正在测试图片识别：只发送随机合成测试图…", "text": "正在测试文字生成：只发送虚构的会议确认对话…", "models": "正在获取接口的模型列表…"}[kind])
             self.api_test_button.configure(state="disabled", text="正在查询…" if kind == "models" else "获取模型列表")
+            self.api_text_test_button.configure(state="disabled", text="正在生成…" if kind == "text" else "测试文字生成")
             self.api_vision_test_button.configure(state="disabled", text="正在识图…" if kind == "vision" else "测试图片识别")
             def work():
                 try:
-                    results.put((True, check_vision(config) if kind == "vision" else test_connection(config)))
+                    action = {"vision": check_vision, "text": check_text, "models": test_connection}[kind]
+                    results.put((True, action(config)))
                 except ServiceError as error:
                     results.put((False, str(error)))
                 except Exception:
-                    results.put((False, "图片测试未完成，请检查模型和图片输入支持。" if kind == "vision" else "测试未完成，请检查接口地址和网络。"))
+                    results.put((False, {"vision": "图片测试未完成，请检查模型和图片输入支持。", "text": "文字测试未完成，请检查模型、接口地址和网络。", "models": "测试未完成，请检查接口地址和网络。"}[kind]))
             threading.Thread(target=work, daemon=True).start()
             probe["after"] = self.root.after(80, lambda: poll_probe(config))
         def finish():
@@ -668,6 +675,8 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
                 self.status.set("尚未填写 API 密钥。可先导入并整理聊天内容。")
             elif probe["vision_verified"] == config:
                 self.status.set("AI 设置已更新，当前模型已通过合成图片识别测试；聊天截图仍需核对。")
+            elif probe["text_verified"] == config:
+                self.status.set("AI 设置已更新，本次文字生成测试通过；图片能力和持续稳定性需另行确认。")
             elif probe["models_verified"] == config:
                 self.status.set("AI 设置已更新，模型列表可达；尚未验证生成或图片识别。")
             else:
@@ -687,8 +696,10 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         actions.grid(row=8, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 10))
         self.api_test_button = ttk.Button(actions, text="获取模型列表", command=test_api)
         self.api_test_button.pack(side="left")
+        self.api_text_test_button = ttk.Button(actions, text="测试文字生成", command=lambda: test_api("text"))
+        self.api_text_test_button.pack(side="left", padx=8)
         self.api_vision_test_button = ttk.Button(actions, text="测试图片识别", command=lambda: test_api("vision"))
-        self.api_vision_test_button.pack(side="left", padx=8)
+        self.api_vision_test_button.pack(side="left")
         ttk.Button(actions, text="保存并继续", command=finish, style="Accent.TButton").pack(side="right")
         dialog.protocol("WM_DELETE_WINDOW", cancel)
         dialog.grab_set()

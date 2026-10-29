@@ -129,6 +129,41 @@ class ApiTransportTests(unittest.TestCase):
             self.assertNotIn('private-details', str(raised.exception))
             opened.assert_called_once()
 
+    def test_forbidden_errors_identify_request_type_without_claiming_a_cause(self):
+        image_messages = [{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {'url': 'private-image'}}]}]
+        cases = [
+            (lambda: server.generate(self.config, [], reply_count=1), '文字生成'),
+            (lambda: server.generate(self.config, [], reply_count=1, include_analysis=True, transcribe_images=True), '看图'),
+            (lambda: server.generate(self.config, image_messages, reply_count=1), '看图'),
+            (lambda: server.test_connection(self.config), '模型列表'),
+        ]
+        for action, request_type in cases:
+            error = urllib.error.HTTPError(self.base, 403, 'private-provider-details', {'X-Debug': 'test-only-key'}, io.BytesIO(b'private-chat'))
+            with self.subTest(request_type=request_type), patch('server.urllib.request.OpenerDirector.open', side_effect=error) as opened:
+                with self.assertRaises(server.ServiceError) as raised:
+                    action()
+            message = str(raised.exception)
+            self.assertIn(request_type, message)
+            self.assertIn('HTTP 403', message)
+            self.assertIn('中间代理', message)
+            for private in ('private-', 'test-only-key', self.base):
+                self.assertNotIn(private, message)
+            if request_type == '看图':
+                self.assertIn('本机识字并分析', message)
+                self.assertIn('image_url', message)
+            opened.assert_called_once()
+
+    def test_an_intermittent_403_does_not_disable_later_manual_generation(self):
+        replies = [{'label': '确认', 'text': '收到。'}]
+        response = json.dumps({'choices': [{'message': {'content': json.dumps({'replies': replies})}}]}).encode()
+        error = urllib.error.HTTPError(self.base, 403, 'private-provider-details', {}, None)
+        with patch('server.urllib.request.OpenerDirector.open', side_effect=[io.BytesIO(response), error, io.BytesIO(response)]) as opened:
+            self.assertEqual(server.generate(self.config, [], reply_count=1), replies)
+            with self.assertRaisesRegex(server.ServiceError, 'HTTP 403'):
+                server.generate(self.config, [], reply_count=1)
+            self.assertEqual(server.generate(self.config, [], reply_count=1), replies)
+        self.assertEqual(opened.call_count, 3, 'each explicit action sends exactly one request')
+
     def test_settings_http_opt_in_is_paired_with_its_address(self):
         settings = DesktopSettings()
         with self.assertRaises(ValueError):

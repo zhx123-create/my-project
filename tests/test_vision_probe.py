@@ -8,7 +8,7 @@ import urllib.error
 from PIL import Image
 
 from server import Config, ServiceError, test_connection as fetch_models
-from vision_probe import check_vision
+from vision_probe import check_text, check_vision
 
 
 class VisionProbeTests(unittest.TestCase):
@@ -19,6 +19,39 @@ class VisionProbeTests(unittest.TestCase):
     def response(self, code):
         result = {'understanding': '识字测试', 'replies': [{'label': '确认', 'text': '识别完成。'}], 'screenshot_text': code}
         return io.BytesIO(json.dumps({'choices': [{'message': {'content': json.dumps(result)}}]}).encode())
+
+    def test_text_probe_uses_actual_generation_contract_without_images_or_history(self):
+        with patch('server.urllib.request.OpenerDirector.open', return_value=self.response('')) as opened:
+            self.assertTrue(check_text(self.config))
+        opened.assert_called_once()
+        request = opened.call_args.args[0]
+        self.assertEqual(request.full_url, self.config.base + '/chat/completions')
+        self.assertEqual(request.get_method(), 'POST')
+        payload = json.loads(request.data)
+        self.assertEqual(payload['model'], self.config.model)
+        self.assertEqual(payload['response_format'], {'type': 'json_object'})
+        self.assertIs(payload['stream'], False)
+        content = payload['messages'][1]['content']
+        self.assertEqual(len(content), 1)
+        self.assertEqual(content[0]['type'], 'text')
+        data = json.loads(content[0]['text'])
+        self.assertIn('虚构', data['我的回复意图'])
+        self.assertEqual(data['已记录的历史'], '')
+        self.assertEqual(data['用户填写的背景'], '')
+
+    def test_text_probe_does_not_pass_for_models_list_or_invalid_reply_structure(self):
+        for body in ({'data': [{'id': self.config.model}]}, {'choices': [{'message': {'content': '{"replies": []}'}}]}):
+            with self.subTest(body=body), patch('server.urllib.request.OpenerDirector.open', return_value=io.BytesIO(json.dumps(body).encode())):
+                with self.assertRaises(ServiceError):
+                    check_text(self.config)
+
+    def test_text_probe_propagates_access_failure_without_retry(self):
+        error = urllib.error.HTTPError(self.config.base, 403, 'private provider response', {}, None)
+        with patch('server.urllib.request.OpenerDirector.open', side_effect=error) as opened:
+            with self.assertRaisesRegex(ServiceError, '文字生成.*HTTP 403') as raised:
+                check_text(self.config)
+        opened.assert_called_once()
+        self.assertNotIn('private provider', str(raised.exception))
 
     def test_actual_image_request_contains_no_answer_or_private_chat_in_text(self):
         with patch('vision_probe.secrets.choice', side_effect=self.code), patch('server.urllib.request.OpenerDirector.open', return_value=self.response(self.code)) as opened:
