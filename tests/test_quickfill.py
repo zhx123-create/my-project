@@ -123,6 +123,14 @@ class NativeQuickFillTests(unittest.TestCase):
                 _live({**snapshot(), 'action': 'fill', 'text': '旧回复'}, self.api)
         self.api.type_unicode.assert_not_called()
 
+    def test_floating_entry_never_reads_a_different_window_after_the_click(self):
+        expected = {'handle': 999, 'pid': 456, 'title': '之前的聊天'}
+        with patch('quickfill_native.sys.platform', 'win32'), patch('quickfill_native.read_context') as read:
+            with self.assertRaisesRegex(QuickFillError, '未读取其他聊天'):
+                _live({'action': 'read_current', 'expected_window': expected}, self.api)
+        read.assert_not_called()
+        self.api.type_unicode.assert_not_called()
+
     def test_snapshot_protocol_rejects_bad_scope_or_digest(self):
         for update in ({'window': {'handle': True, 'pid': 456, 'title': 'x'}}, {'focus': {'handle': 123, 'input_time': -1}}, {'digest': 'wrong'}, {'source': 'desktop'}):
             with self.subTest(update=update), self.assertRaises(ValueError):

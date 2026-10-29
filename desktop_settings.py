@@ -15,7 +15,7 @@ from server import normalize_api_base
 _SCHEMA = "jiehua.desktop-settings"
 _MAX_BYTES = 16 * 1024
 _DEFAULTS = {"base": "https://api.openai.com/v1", "model": "gpt-4.1-mini", "allow_http": False,
-             "auto_copy": False, "watch_interval": 10, "last_profile": "", "capture_source": "窗口文字", "max_output_tokens": 4096}
+             "auto_copy": False, "watch_interval": 10, "last_profile": "", "capture_source": "窗口文字", "max_output_tokens": 4096, "floating_enabled": True}
 
 
 def supports_secure_storage() -> bool:
@@ -81,6 +81,8 @@ def _values(raw):
         raise ValueError("采集方式请选择窗口文字或截图转文字。")
     if type(result["auto_copy"]) is not bool:
         raise ValueError("自动复制开关必须为布尔值。")
+    if type(result["floating_enabled"]) is not bool:
+        raise ValueError("微信浮窗开关必须为布尔值。")
     if type(result["watch_interval"]) is not int or result["watch_interval"] not in (5, 10, 20, 30):
         raise ValueError("检查间隔请选择 5、10、20 或 30 秒。")
     if type(result["max_output_tokens"]) is not int or not 512 <= result["max_output_tokens"] <= 16384:

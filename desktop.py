@@ -19,6 +19,9 @@ from conversation_watch import ConversationWatch
 from desktop_automation import AutomationMixin
 from desktop_robot import RobotMixin
 from desktop_quickfill import QuickFillMixin
+from desktop_floating import FloatingMixin
+from floating_window import FloatingProgress
+from wechat_presence import WeChatPresence
 from wechat_hotkey import WeChatHotkey
 from desktop_screenshots import ScreenshotMixin, TEXT_SOURCE, SCREENSHOT_SOURCE, VISION_HEADER
 from desktop_settings import DesktopSettings, supports_secure_storage
@@ -148,7 +151,7 @@ class CropDialog(tk.Toplevel):
                 self.info.set(str(error))
 
 
-class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin, QuickFillMixin):
+class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin, QuickFillMixin, FloatingMixin):
     def __init__(self, root, memory=None, meme_library=None, settings=None):
         self.root = root
         self.root.title("接话 · Windows 微信回复助手")
@@ -187,6 +190,16 @@ class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin, QuickFillMixin):
         self.quickfill_countdown = None
         self.quickfill_generation_started = None
         self.quickfill_restore_on_error = False
+        self.quickfill_from_float = False
+        self.quickfill_window = None
+        self.floating_enabled = tk.BooleanVar(value=preferences['floating_enabled'])
+        self.floating_progress = FloatingProgress()
+        self.floating_card = None
+        self.floating_target = None
+        self.floating_last_key = None
+        self.presence_events = queue.Queue(maxsize=1)
+        self.presence_watcher = WeChatPresence(self.presence_events)
+        self.presence_watcher.set_enabled(self.floating_enabled.get())
         self.hotkey_listener = WeChatHotkey(self.hotkey_events)
         self._active_capture_source = preferences["capture_source"]
         self.shot_readers = {}
@@ -235,7 +248,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin, QuickFillMixin):
         self.screenshot = None
         self.preview_photo = None
         self.windows = []
-        self.status = tk.StringVar(value="在独立微信聊天的空白输入框按 Ctrl+Alt+R，自动读取并填入回复；也可点击“一键填入微信”选窗。")
+        self.status = tk.StringVar(value="打开独立微信聊天，点空白输入框，再点旁边浮窗的“生成”；浮窗会显示阶段和等待秒数。")
         self.window_choice = tk.StringVar()
         self.capture_status = tk.StringVar(value="优先读取消息文字。请确认微信中打开的联系人，与下方记忆会话一致。")
         self.conversation_name = tk.StringVar(value=TEMP_CONVERSATION)
@@ -278,6 +291,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin, QuickFillMixin):
         self.root.bind("<Control-Return>", lambda event: self.generate_from_editor())
         self.poll_id = self.root.after(80, self.poll)
         self.hotkey_listener.start()
+        self.presence_watcher.start()
 
     def button(self, parent, text, command, **kwargs):
         button = ttk.Button(parent, text=text, command=command)
@@ -929,6 +943,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin, QuickFillMixin):
         threading.Thread(target=work, daemon=True).start()
 
     def poll(self):
+        self.poll_floating()
         self.poll_quickfill()
         self.poll_robot()
         self.poll_discovery()
@@ -1053,6 +1068,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin, QuickFillMixin):
 
     def close(self):
         self.cancel_quickfill(closing=True)
+        self.stop_floating()
         self.hotkey_listener.stop()
         self.stop_robot()
         self.stop_watch("助手已关闭")

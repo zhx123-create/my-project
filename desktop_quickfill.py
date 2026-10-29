@@ -11,8 +11,9 @@ from windows_capture import CaptureError, Window
 
 
 class QuickFillJob:
-    def __init__(self, config, data, events):
+    def __init__(self, config, data, events, expected_window=None):
         self.config, self.data, self.events = config, copy.deepcopy(data), events
+        self.expected_window = copy.deepcopy(expected_window)
         self.cancel = OperationCancellation()
 
     def emit(self, kind, **values):
@@ -24,7 +25,10 @@ class QuickFillJob:
     def run(self):
         try:
             self.emit('reading')
-            snapshot = call_native({'action': 'read_current'}, self.cancel)
+            read = {'action': 'read_current'}
+            if self.expected_window is not None:
+                read['expected_window'] = self.expected_window
+            snapshot = call_native(read, self.cancel)
             if self.cancel.is_set():
                 return
             self.emit('context', snapshot=snapshot)
@@ -48,12 +52,14 @@ class QuickFillJob:
 
 
 class QuickFillMixin:
-    def start_quickfill(self, from_hotkey=False):
+    def start_quickfill(self, from_hotkey=False, from_float=False):
         if self.quickfill_job is not None:
             self.cancel_quickfill()
             return
         if self.busy or self.robot is not None:
             self.status.set('请先暂停当前机器人或等待当前操作完成，再使用一键填入。')
+            return
+        if from_float and self.floating_target is None:
             return
         config = self.current_api_config()
         try:
@@ -72,13 +78,18 @@ class QuickFillMixin:
         self.stop_watch('已切换到一键填入微信')
         self.remove_image()
         self.quickfill_profile = self.active_profile
-        self.quickfill_job = QuickFillJob(config, data, self.quickfill_events)
+        self.quickfill_window = self.floating_target if from_float else None
+        expected = ({'handle': self.quickfill_window.handle, 'pid': self.quickfill_window.pid, 'title': self.quickfill_window.title}
+                    if self.quickfill_window is not None else None)
+        self.quickfill_job = QuickFillJob(config, data, self.quickfill_events, expected_window=expected)
         self.quickfill_generation_started = None
-        self.quickfill_restore_on_error = not from_hotkey
+        self.quickfill_from_float = from_float
+        self.quickfill_restore_on_error = not (from_hotkey or from_float)
+        self.floating_begin(choosing=not (from_hotkey or from_float))
         self.quickfill_button.configure(text='取消填入')
         self.set_busy(True, operation='quickfill')
         job = self.quickfill_job
-        if from_hotkey:
+        if from_hotkey or from_float:
             job.start()
         else:
             self.status.set('3 秒内点击单独打开的微信聊天的空白输入框；之后自动读取、生成并填入。等待时保持键鼠不动。也可直接在微信按 Ctrl+Alt+R。')
@@ -90,7 +101,7 @@ class QuickFillMixin:
                     job.start()
             self.quickfill_countdown = self.root.after(3000, finish_countdown)
 
-    def cancel_quickfill(self, closing=False):
+    def cancel_quickfill(self, closing=False, preserve_focus=False):
         job = self.quickfill_job
         if job is None:
             return
@@ -101,13 +112,14 @@ class QuickFillMixin:
             self.quickfill_countdown = None
         self.quickfill_generation_started = None
         if not closing:
+            self.floating_phase('cancelled')
             self.quickfill_button.configure(text='一键填入微信')
             if self.reply_labels[0].cget('text') == '已生成 · 正在填入微信':
                 self.reply_labels[0].configure(text='填入已取消 · 草稿已保留')
             if self.active_operation == 'quickfill':
                 self.set_busy(False)
             self.root.title('接话 · Windows 微信回复助手')
-            if self.quickfill_restore_on_error:
+            if self.quickfill_restore_on_error and not preserve_focus:
                 self.root.deiconify()
             self.status.set('已取消后续填入。若文字已开始出现，请核对微信输入框；程序没有执行发送。')
 
@@ -129,10 +141,12 @@ class QuickFillMixin:
             if job is not self.quickfill_job or job.cancel.is_set():
                 continue
             if kind == 'reading':
+                self.floating_phase('reading')
                 self.status.set('正在自动读取所选微信聊天；无法直接读取时由本机自动截图识字。请保持键鼠不动。')
             elif kind == 'context':
                 snapshot = values['snapshot']
                 window = Window(**snapshot['window'])
+                self.quickfill_window = window
                 self.windows = [window]
                 self.window_box.configure(values=[window.title]); self.window_box.current(0)
                 self.context.configure(state='normal'); self.context.delete('1.0', 'end'); self.context.insert('1.0', snapshot['context']); self.context.configure(state='disabled')
@@ -142,8 +156,10 @@ class QuickFillMixin:
                     except (ValueError, OSError):
                         self.cancel_quickfill(); self.status.set('会话记忆未能保存，本次填入已取消。'); continue
             elif kind == 'generating':
+                self.floating_phase('generating')
                 self.quickfill_generation_started = time.monotonic()
             elif kind == 'generated':
+                self.floating_phase('filling')
                 self.quickfill_generation_started = None
                 result = values['result']
                 for editor in self.reply_texts:
@@ -159,18 +175,21 @@ class QuickFillMixin:
                 self.status.set('回复已生成，正在核对聊天是否变化并填入微信。请保持输入焦点不动。')
             elif kind == 'filled':
                 confirmed = values['receipt']['confirmed']
+                self.floating_phase('filled' if confirmed else 'submitted')
                 self.reply_labels[0].configure(text='已填入微信 · 未发送' if confirmed else '已提交文字输入 · 请核对微信')
                 self.status.set('回复已填入微信输入框，由你检查后按发送。' if confirmed else '已向所选焦点提交文字输入，请查看微信输入框；程序没有执行发送。')
                 self.root.title('接话 · 回复已处理，请查看微信输入框')
             elif kind == 'error':
+                self.floating_phase('error')
                 self.quickfill_generation_started = None
                 if self.reply_labels[0].cget('text') == '已生成 · 正在填入微信':
                     self.reply_labels[0].configure(text='填入未完成 · 草稿已保留')
                 self.status.set(values['message'])
                 self.understanding.configure(state='normal'); self.understanding.delete('1.0', 'end'); self.understanding.insert('1.0', '一键填入未完成：\n' + values['message']); self.understanding.configure(state='disabled')
                 self.root.title('接话 · 一键填入未完成')
-                self.root.deiconify()
-                self.root.lift()
+                if not self.quickfill_from_float:
+                    self.root.deiconify()
+                    self.root.lift()
             elif kind == 'done':
                 self.quickfill_job = None
                 self.quickfill_generation_started = None

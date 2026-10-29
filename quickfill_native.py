@@ -197,6 +197,9 @@ def _live(payload, api=None):
         window = api.identify(api.user.GetForegroundWindow())
         if window is None:
             raise QuickFillError('请先点击单独打开的微信聊天输入框，再按 Ctrl+Alt+R，或使用助手的“一键填入微信”。')
+        actual = {'handle': window.handle, 'pid': window.pid, 'title': window.title}
+        if payload.get('expected_window') is not None and payload['expected_window'] != actual:
+            raise QuickFillError('浮窗对应的微信窗口已变化，未读取其他聊天。请重新点击目标聊天的空白输入框，再点浮窗生成。')
         expected = api.focus_token(window)
         verify_focus(api, window, expected)
         text, source = read_context(window, api)

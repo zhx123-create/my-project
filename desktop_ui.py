@@ -115,6 +115,8 @@ def build_desktop_ui(app):
     app.robot_button = ttk.Button(header, text="聊天机器人", command=app.show_robot, style="Soft.TButton")
     app.robot_button.pack(side="right", padx=(8, 0))
     app.style_buttons.append(button(header, "表达风格", app.show_reply_style, side="right", style="Soft.TButton"))
+    app.floating_toggle = ttk.Checkbutton(header, text="微信浮窗", variable=app.floating_enabled, command=app.toggle_floating)
+    app.floating_toggle.pack(side="right", padx=(0, 12))
 
     profile_card, profile = _card(page, padding=(12, 9))
     profile_card.grid(row=1, column=0, sticky="ew", pady=(0, 14))
@@ -169,7 +171,7 @@ def build_desktop_ui(app):
     app.context = _text(inputs, height=6)
     app.context.grid(row=0, column=0, sticky="nsew")
     app.controls.append((app.context, "normal"))
-    _placeholder(app.context, "在微信空白输入框按 Ctrl+Alt+R，\n自动读取并填入回复。也可点下方\n“一键填入微信”，或粘贴聊天。")
+    _placeholder(app.context, "点微信空白输入框，再点旁边\n浮窗的“生成”。等待过程和秒数\n会显示在小浮窗中。")
     ttk.Label(inputs, text="这次想怎么聊？", style="Title.Card.TLabel").grid(row=2, column=0, sticky="w", pady=(13, 8))
     app.intent = _text(inputs, height=1, padding=9)
     app.intent.grid(row=3, column=0, sticky="ew")

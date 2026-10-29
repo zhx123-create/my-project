@@ -42,6 +42,18 @@ class DesktopSettingsTests(unittest.TestCase):
         if settings.os.name != "nt":
             self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
+    def test_floating_preference_persists_and_legacy_settings_default_to_enabled(self):
+        subject = DesktopSettings(self.path)
+        self.assertTrue(subject.values()['floating_enabled'])
+        subject.update(floating_enabled=False)
+        self.assertFalse(DesktopSettings(self.path).values()['floating_enabled'])
+        with self.assertRaises(ValueError):
+            subject.update(floating_enabled='yes')
+        raw = json.loads(self.path.read_text())
+        raw['values'].pop('floating_enabled')
+        self.path.write_text(json.dumps(raw))
+        self.assertTrue(DesktopSettings(self.path).values()['floating_enabled'])
+
     def test_output_limit_persists_and_old_settings_get_a_usable_default(self):
         subject = DesktopSettings(self.path)
         subject.set_api('https://api.example.com/v1', 'model', '', False, max_output_tokens=8192)
