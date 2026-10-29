@@ -56,7 +56,15 @@ class ScreenshotMixin:
         return self.capture_source.get() == SCREENSHOT_SOURCE
 
     def primary_action_label(self):
-        return "一键截图识字" if self.screenshot_mode() else "一键分析当前聊天"
+        return "分析微信窗口" if self.screenshot_mode() else "一键分析当前聊天"
+
+    def begin_manual_screenshot(self):
+        # A system screenshot/file is already a complete image source. Stop
+        # live reads before opening a modal preview or the system snip overlay;
+        # modal Tk dialogs do not stop scheduled automation callbacks.
+        self.stop_watch("已切换到手动截图，定时采集已暂停")
+        self.status.set("使用已有截图，不再采集微信窗口。请导入图片并选择识别方式。")
+        self.capture_status.set("手动截图不检查微信窗口的位置、遮挡或是否最小化。")
 
     def capture_source_changed(self, *_args):
         if self.capture_source.get() == self._active_capture_source:
@@ -125,6 +133,7 @@ class ScreenshotMixin:
     def paste_screenshot(self):
         if self.busy:
             return
+        self.begin_manual_screenshot()
         try:
             image = ImageGrab.grabclipboard()
             if not isinstance(image, Image.Image):
@@ -138,6 +147,7 @@ class ScreenshotMixin:
     def open_screenshot_file(self):
         if self.busy:
             return
+        self.begin_manual_screenshot()
         path = filedialog.askopenfilename(parent=self.root, title="打开聊天截图", filetypes=[("图片", "*.png *.jpg *.jpeg *.webp *.bmp")])
         if not path:
             return
@@ -155,6 +165,7 @@ class ScreenshotMixin:
     def analyze_vision_image(self, image):
         if self.busy:
             return
+        self.begin_manual_screenshot()
         if not self.key.get().strip():
             self.resume_action = lambda: self.analyze_vision_image(image)
             self.show_settings()
@@ -186,11 +197,11 @@ class ScreenshotMixin:
     def analyze_screenshot_image(self, image, watch_seed=False, reader=None):
         if self.busy:
             return
+        if not watch_seed and reader is None:
+            self.begin_manual_screenshot()
         if not self.key.get().strip():
             self.resume_action = lambda: self.analyze_screenshot_image(image, watch_seed, reader)
             self.show_settings(); return
-        if self.watch.active and not watch_seed:
-            self.stop_watch("已改用手动截图")
         self.remove_image()
         token, profile = self._discovery_token, self.active_profile
         watch_token = self.watch.generation
@@ -219,9 +230,12 @@ class ScreenshotMixin:
             kind, token, profile, window, success, value = self.screenshot_events.get_nowait()
         except queue.Empty:
             return
-        self.set_busy(False)
         if token != self._discovery_token or profile != self.active_profile:
+            operation = "bind_region" if kind == "bind" else "ocr"
+            if self.active_operation == operation and self._busy_source_token == token:
+                self.set_busy(False)
             return
+        self.set_busy(False)
         if not success:
             self.stop_watch("截图识字未完成")
             self.status.set(value)

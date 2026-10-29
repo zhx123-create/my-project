@@ -276,7 +276,7 @@ def build_desktop_ui(app):
     action_bar = ttk.Frame(page); action_bar.grid(row=3, column=0, sticky="ew", pady=(14, 0))
     app.analyze_button = button(action_bar, "一键分析当前聊天", getattr(app, "quick_analyze", app.analyze_current_chat), style="Accent.TButton")
     app.generate_button = button(action_bar, "用编辑内容生成", getattr(app, "generate_from_editor", app.request_generation), padx=(10, 0))
-    app.screenshot_button = button(action_bar, "截图识字", app.start_screenshot_analysis, style="Soft.TButton", padx=(8, 0))
+    app.screenshot_button = button(action_bar, "截取微信", app.start_screenshot_analysis, style="Soft.TButton", padx=(8, 0))
     if hasattr(app, "toggle_watch"):
         app.watch_button = ttk.Button(action_bar, text="开启自动辅助", command=app.toggle_watch, style="Soft.TButton")
         app.watch_button.pack(side="right")

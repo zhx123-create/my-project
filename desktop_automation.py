@@ -62,9 +62,11 @@ class AutomationMixin:
             token, success, value = self.discovery_events.get_nowait()
         except queue.Empty:
             return
-        self.set_busy(False)
         if token != self._discovery_token:
+            if self.active_operation == "discover" and self._busy_source_token == token:
+                self.set_busy(False)
             return
+        self.set_busy(False)
         if not success or not value:
             self.stop_watch("没有可用的微信窗口")
             self.status.set(value if not success else "没有找到微信。打开并登录微信后，再点一键分析。")

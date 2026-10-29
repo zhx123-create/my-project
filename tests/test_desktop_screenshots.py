@@ -166,6 +166,71 @@ class ScreenshotFlowTests(unittest.TestCase):
         opened.assert_not_called(); ocr.assert_not_called()
         self.assertIsNone(self.app.screenshot)
 
+    def test_pasting_system_screenshot_stops_live_capture_before_preview(self):
+        self.app.capture_source.set(SCREENSHOT_SOURCE)
+        self.app.watch.start('朋友', self.window)
+        self.app.watch.next_check_at = 0
+        self.app._watch_start_requested = True
+        with patch('desktop_screenshots.ImageGrab.grabclipboard', return_value=self.image), patch('desktop_screenshots.capture_visible_isolated', side_effect=CaptureError('选区移出屏幕')) as capture, patch('desktop_automation.list_windows') as windows, patch('desktop_screenshots.recognize_image', return_value=ocr_text('未知：晚上一起吃饭吗？')), patch('desktop.generate', return_value=self.result) as model:
+            self.app.paste_screenshot()
+            self.assertFalse(self.app.watch.active)
+            self.assertFalse(self.app._watch_start_requested)
+            self.app.automation_tick()
+            capture.assert_not_called(); windows.assert_not_called(); model.assert_not_called()
+            self.choose_region(); self.settle()
+            capture.assert_not_called(); windows.assert_not_called(); model.assert_called_once()
+        self.assertIn('一起吃饭', self.app.context.get('1.0', 'end-1c'))
+
+    def test_screenshot_file_does_not_need_an_onscreen_wechat_window(self):
+        path = Path(self.folder.name) / 'chat.png'
+        self.image.save(path)
+        self.app.windows = []; self.app.window_choice.set('')
+        with patch('desktop_screenshots.filedialog.askopenfilename', return_value=str(path)), patch('desktop_screenshots.capture_visible_isolated', side_effect=CaptureError('选区移出屏幕')) as capture, patch('desktop_screenshots.recognize_image', return_value=ocr_text('未知：周五几点见？')), patch('desktop.generate', return_value=self.result) as model:
+            self.app.open_screenshot_file(); self.choose_region(); self.settle()
+        capture.assert_not_called(); model.assert_called_once()
+        self.assertIn('周五几点', self.app.context.get('1.0', 'end-1c'))
+
+    def test_system_snip_pauses_live_capture_before_minimizing(self):
+        self.app.capture_source.set(SCREENSHOT_SOURCE)
+        self.app.watch.start('朋友', self.window)
+        self.app.watch.next_check_at = 0
+        def launch():
+            self.assertFalse(self.app.watch.active)
+            self.app.automation_tick()
+        with patch('desktop.launch_snipping_tool', side_effect=launch), patch.object(self.root, 'iconify'), patch('desktop_automation.list_windows') as windows:
+            self.app.system_screenshot()
+        windows.assert_not_called()
+        self.assertIn('粘贴截图', self.app.status.get())
+
+    def test_stale_window_error_cannot_override_manual_image_request(self):
+        token = self.app._discovery_token
+        self.app.begin_manual_screenshot()
+        self.app.set_busy(True)
+        self.app.status.set('正在等待大模型看图')
+        self.app.screenshot_events.put(('ocr', token, '朋友', self.window, False, '选区移出屏幕'))
+        self.app.discovery_events.put((token, False, '微信窗口查找失败'))
+        with patch('desktop_screenshots.messagebox.showwarning') as warning:
+            self.app.poll_screenshots(); self.app.poll_discovery()
+        warning.assert_not_called()
+        self.assertTrue(self.app.busy)
+        self.assertEqual(self.app.status.get(), '正在等待大模型看图')
+
+    def test_cancelling_window_capture_or_discovery_still_releases_its_controls(self):
+        for operation in ('bind_region', 'ocr', 'discover'):
+            with self.subTest(operation=operation):
+                token = self.app._discovery_token
+                self.app.set_busy(True, operation=operation)
+                self.app.stop_watch('已取消')
+                if operation == 'discover':
+                    self.app.discovery_events.put((token, False, '选区移出屏幕'))
+                    self.app.poll_discovery()
+                else:
+                    kind = 'bind' if operation == 'bind_region' else 'ocr'
+                    self.app.screenshot_events.put((kind, token, '朋友', self.window, False, '选区移出屏幕'))
+                    self.app.poll_screenshots()
+                self.assertFalse(self.app.busy)
+                self.assertNotIn('disabled', self.app.generate_button.state())
+
 
 if __name__ == '__main__':
     unittest.main()

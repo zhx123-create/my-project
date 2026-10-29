@@ -192,6 +192,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         self.watch_interval = tk.IntVar(value=preferences["watch_interval"])
         self.auto_copy = tk.BooleanVar(value=preferences["auto_copy"])
         self.active_operation = None
+        self._busy_source_token = None
         self.job_started = None
         self._generation_transcribe_images = False
         self.last_reader_text = None
@@ -675,8 +676,9 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
     def system_screenshot(self):
         if self.busy:
             return
+        self.begin_manual_screenshot()
         self.status.set("请框选微信聊天；截图后回到助手，点主界面的“粘贴截图”识字并分析。")
-        self.capture_status.set("系统截图完成后，回到助手点“粘贴截图”，确认消息选区后会本机识字。")
+        self.capture_status.set("定时采集已暂停。截图后点“粘贴截图”，选择大模型看图或本机识字；无需重新截取微信窗口。")
         self.root.iconify()
         try:
             launch_snipping_tool()
@@ -751,6 +753,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
     def import_image(self):
         if self.busy:
             return
+        self.begin_manual_screenshot()
         try:
             image = ImageGrab.grabclipboard()
             if not isinstance(image, Image.Image):
@@ -780,6 +783,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
     def set_busy(self, busy, operation="generate"):
         self.busy = busy
         self.active_operation = operation if busy else None
+        self._busy_source_token = self._discovery_token if busy else None
         for widget, normal in self.controls:
             keep_editable = operation == "watch_read" and widget in (*self.reply_texts, *self.reply_action_buttons)
             widget.configure(state="disabled" if busy and not keep_editable else normal)
