@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 
 from server import validate_style
+from reply_persona import validate_persona
 
 MAX_HISTORY_CHARS = 12000
 MAX_PROFILES = 100
@@ -62,7 +63,7 @@ class ConversationMemory:
         if name not in self._profiles:
             if len(self._profiles) >= MAX_PROFILES:
                 raise ValueError("最多保存 100 个会话，请先删除不需要的会话。")
-            self._profiles[name] = {"name": name, "background": "", "relationship": "", "goal": "", "style": validate_style(), "history": [], "last_snapshot": ""}
+            self._profiles[name] = {"name": name, "background": "", "relationship": "", "goal": "", "style": validate_style(), "persona": validate_persona(), "bot_rules": "", "history": [], "last_snapshot": ""}
             self._save()
         return self._profiles[name]
 
@@ -71,13 +72,17 @@ class ConversationMemory:
         profile.pop("last_snapshot", None)
         return profile
 
-    def update_profile(self, name, *, background=None, relationship=None, goal=None, style=None):
+    def update_profile(self, name, *, background=None, relationship=None, goal=None, style=None, persona=None, bot_rules=None):
         updates = {}
         for key, value, limit, label in (("background", background, 3000, "背景"), ("relationship", relationship, 100, "关系"), ("goal", goal, 1000, "沟通目标")):
             if value is not None:
                 updates[key] = _text(value, limit, label)
         if style is not None:
             updates["style"] = validate_style(style)
+        if persona is not None:
+            updates["persona"] = validate_persona(persona)
+        if bot_rules is not None:
+            updates["bot_rules"] = _text(bot_rules, 1000, "自动回复规则")
         profile = self._ensure(name)
         profile.update(updates)
         self._save()
@@ -107,11 +112,15 @@ class ConversationMemory:
         self._save()
         return bool(addition)
 
-    def confirm_sent(self, name, text):
-        """Only call for a user explicitly confirming an actually sent reply."""
+    def confirm_sent(self, name, text, *, confirmed_by_robot=False):
+        """Record a user confirmation, or the robot's verified outgoing receipt."""
+        if type(confirmed_by_robot) is not bool:
+            raise ValueError("发送确认来源必须为布尔值。")
         text = _text(text, 3000, "已发送内容", allow_empty=False)
         profile = self._ensure(name)
         entry = {"kind": "sent", "text": text}
+        if confirmed_by_robot:
+            entry["source"] = "robot"
         if profile["history"] and profile["history"][-1] == entry:
             return False
         profile["history"].append(entry)
@@ -122,7 +131,7 @@ class ConversationMemory:
     def history_text(self, name):
         profile = self._ensure(name)
         labels = {"context": "用户导入的聊天", "sent": "用户确认已发送（我）"}
-        return "\n\n".join(f"【{labels[item['kind']]}】\n{item['text']}" for item in profile["history"])
+        return "\n\n".join(f"【{'用户授权机器人核对已发送（我）' if item.get('source') == 'robot' else labels[item['kind']]}】\n{item['text']}" for item in profile["history"])
 
     def clear_history(self, name):
         profile = self._ensure(name)
@@ -205,13 +214,18 @@ class ConversationMemory:
                 if "style" in raw and not isinstance(raw["style"], dict):
                     raise ValueError("invalid style")
                 profile = {"name": name, "background": _text(raw.get("background", ""), 3000, "背景"), "relationship": _text(raw.get("relationship", ""), 100, "关系"), "goal": _text(raw.get("goal", ""), 1000, "沟通目标"), "style": validate_style(raw.get("style")), "last_snapshot": _text(raw.get("last_snapshot", ""), 20000, "聊天内容"), "history": []}
+                profile["persona"] = validate_persona(raw.get("persona"))
+                profile["bot_rules"] = _text(raw.get("bot_rules", ""), 1000, "自动回复规则")
                 entries = raw.get("history", [])
                 if not isinstance(entries, list) or len(entries) > MAX_ENTRIES:
                     raise ValueError("invalid history")
                 for entry in entries:
                     if not isinstance(entry, dict) or entry.get("kind") not in ("context", "sent"):
                         raise ValueError("invalid history item")
-                    profile["history"].append({"kind": entry["kind"], "text": _text(entry.get("text"), 20000, "聊天内容", allow_empty=False)})
+                    loaded_entry = {"kind": entry["kind"], "text": _text(entry.get("text"), 20000, "聊天内容", allow_empty=False)}
+                    if entry.get("source") == "robot" and entry["kind"] == "sent":
+                        loaded_entry["source"] = "robot"
+                    profile["history"].append(loaded_entry)
                 self._trim(profile)
                 loaded[name] = profile
             self._profiles = loaded

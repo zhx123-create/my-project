@@ -17,6 +17,7 @@ from server import (Config, InputError, ServiceError, TONES, DEFAULT_STYLE,
 from conversation_memory import ConversationMemory
 from conversation_watch import ConversationWatch
 from desktop_automation import AutomationMixin
+from desktop_robot import RobotMixin
 from desktop_screenshots import ScreenshotMixin, TEXT_SOURCE, SCREENSHOT_SOURCE, VISION_HEADER
 from desktop_settings import DesktopSettings, supports_secure_storage
 from desktop_ui import apply_theme, build_desktop_ui
@@ -145,7 +146,7 @@ class CropDialog(tk.Toplevel):
                 self.info.set(str(error))
 
 
-class DesktopApp(ScreenshotMixin, AutomationMixin):
+class DesktopApp(ScreenshotMixin, AutomationMixin, RobotMixin):
     def __init__(self, root, memory=None, meme_library=None, settings=None):
         self.root = root
         self.root.title("接话 · Windows 微信回复助手")
@@ -176,6 +177,8 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         self.discovery_events = queue.Queue()
         self.screenshot_events = queue.Queue()
         self.capture_source = tk.StringVar(value=preferences["capture_source"])
+        self.robot = None
+        self.robot_events = queue.Queue()
         self._active_capture_source = preferences["capture_source"]
         self.shot_readers = {}
         self.shot_reader = None
@@ -880,7 +883,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
                 profile = self.memory.profile(self.active_profile)
                 history, background = self.memory.history_text(self.active_profile), profile["background"]
                 context = ""
-            messages = make_messages({"context": context, "history": history, "background": background, "conversation_name": self.active_profile or "", "intent": self.intent.get("1.0", "end-1c"), "relationship": self.relationship.get(), "tone": self.tone.get(), "style": self.style, "images": [self.screenshot] if self.screenshot else [], "reply_count": reply_count, "include_analysis": True, "transcribe_images": transcribe_images})
+            messages = make_messages({"context": context, "history": history, "background": background, "conversation_name": self.active_profile or "", "intent": self.intent.get("1.0", "end-1c"), "relationship": self.relationship.get(), "tone": self.tone.get(), "style": self.style, "persona": profile["persona"] if self.active_profile else None, "images": [self.screenshot] if self.screenshot else [], "reply_count": reply_count, "include_analysis": True, "transcribe_images": transcribe_images})
         except (InputError, ValueError, OSError) as error:
             self.status.set(str(error))
             return
@@ -916,6 +919,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         threading.Thread(target=work, daemon=True).start()
 
     def poll(self):
+        self.poll_robot()
         self.poll_discovery()
         self.poll_screenshots()
         try:
@@ -1037,6 +1041,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         self.status.set("已清空当前输入和草稿；已确认的会话记忆仍保留，可在“背景/记忆”中清除或删除。")
 
     def close(self):
+        self.stop_robot()
         self.stop_watch("助手已关闭")
         self.remember_ui_preferences()
         for identifier in self.root.tk.splitlist(self.root.tk.call("after", "info")):

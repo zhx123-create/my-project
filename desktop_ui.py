@@ -112,6 +112,8 @@ def build_desktop_ui(app):
     ttk.Label(tagline, text="让每句话，都更像你", style="Caption.TLabel").pack(anchor="w")
     ttk.Label(tagline, text="你的微信聊天搭子", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
     button(header, "AI 设置", app.show_settings, side="right", padx=(8, 0))
+    app.robot_button = ttk.Button(header, text="聊天机器人", command=app.show_robot, style="Soft.TButton")
+    app.robot_button.pack(side="right", padx=(8, 0))
     app.style_buttons.append(button(header, "表达风格", app.show_reply_style, side="right", style="Soft.TButton"))
 
     profile_card, profile = _card(page, padding=(12, 9))
