@@ -155,7 +155,7 @@ class ScreenshotMixin:
         self.status.set("正在截取你选中的微信窗口。接下来只需框选一次消息区，不要包含联系人列表。")
         def capture():
             try:
-                events.put(("bind", token, profile, window, True, capture_visible_isolated(window)))
+                events.put(("bind", token, profile, window, True, capture_visible_isolated(window, preview=True)))
             except CaptureError as error:
                 events.put(("bind", token, profile, window, False, str(error)))
             except Exception:
@@ -289,9 +289,12 @@ class ScreenshotMixin:
             messagebox.showwarning("截图识字未完成", value, parent=self.root)
             return
         if kind == "bind":
+            blocks = value.info.get("capture_blocks", [])
             def accept_region(region, size, image):
                 if token != self._discovery_token or profile != self.active_profile:
                     raise CaptureError("会话已改变，请重新绑定。")
+                if any(min(region[2], block[2]) > max(region[0], block[0]) and min(region[3], block[3]) > max(region[1], block[1]) for block in blocks):
+                    raise CaptureError("选区包含灰色遮挡部分。请只框选清楚可见的消息，排除输入框、输入法浮条和其他浮层。")
                 self.shot_reader = ScreenshotReader(ScreenshotBinding(window, profile, tuple(region), tuple(size)))
                 self.shot_readers[profile] = self.shot_reader
                 self.capture_status.set("消息区域已绑定。请把微信与助手并排摆放，保持选区不被遮挡；改变窗口大小后需重新框选。")

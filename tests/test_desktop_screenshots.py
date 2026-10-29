@@ -66,7 +66,7 @@ class ScreenshotFlowTests(unittest.TestCase):
             self.app.start_screenshot_analysis(); self.settle()
             model.assert_not_called(); ocr.assert_not_called()
             self.choose_region(); self.settle()
-        activate.assert_called_once_with(self.window); capture.assert_called_once_with(self.window)
+        activate.assert_called_once_with(self.window); capture.assert_called_once_with(self.window, preview=True)
         ocr.assert_called_once(); model.assert_called_once()
         self.assertEqual(self.app.shot_reader.binding.region, (20, 20, 220, 160))
         self.assertEqual(self.app.capture_source.get(), SCREENSHOT_SOURCE)
@@ -250,7 +250,7 @@ class ScreenshotFlowTests(unittest.TestCase):
             next(widget for widget in items if widget.winfo_class() == 'TButton' and widget.cget('text') == '使用这个窗口').invoke()
             self.settle(); self.choose_region(); self.settle()
         activate.assert_called_once_with(detached)
-        capture.assert_called_once_with(detached)
+        capture.assert_called_once_with(detached, preview=True)
         self.assertEqual(self.app.shot_reader.binding.window, detached)
 
     def test_missing_wechat_discovery_can_bind_clicked_window_and_watch_it(self):
@@ -276,7 +276,7 @@ class ScreenshotFlowTests(unittest.TestCase):
             self.assertEqual(len(scheduled), 1)
             scheduled.pop()(); self.settle()
             self.assertEqual(self.app.windows, [selected])
-            capture.assert_called_once_with(selected); model.assert_not_called()
+            capture.assert_called_once_with(selected, preview=True); model.assert_not_called()
             self.choose_region(); self.settle()
             model.assert_called_once()
             crop = self.image.crop(self.app.shot_reader.binding.region)
@@ -285,6 +285,27 @@ class ScreenshotFlowTests(unittest.TestCase):
             self.assertTrue(self.app.watch.active)
             self.assertTrue(self.app.watch.window.user_selected)
             discover.assert_called_once()
+
+    def test_initial_preview_allows_input_toolbar_outside_selected_messages(self):
+        self.image.info['capture_blocks'] = [[0, 250, 400, 300]]
+        with patch('desktop_screenshots.activate_window'), patch('desktop_screenshots.capture_visible_isolated', return_value=self.image), patch('desktop_screenshots.recognize_image', return_value=ocr_text('未知：周五几点见？')) as ocr, patch('desktop.generate', return_value=self.result) as model:
+            self.app.start_screenshot_analysis(); self.settle()
+            self.choose_region(); self.settle()
+        ocr.assert_called_once(); model.assert_called_once()
+        self.assertEqual(self.app.shot_reader.binding.region, (20, 20, 220, 160))
+
+    def test_masked_area_cannot_be_selected_or_submitted_to_ai(self):
+        self.image.info['capture_blocks'] = [[30, 30, 60, 60]]
+        with patch('desktop_screenshots.activate_window'), patch('desktop_screenshots.capture_visible_isolated', return_value=self.image), patch('desktop_screenshots.recognize_image', return_value=ocr_text('未知：周五几点见？')) as ocr, patch('desktop.generate', return_value=self.result) as model:
+            self.app.start_screenshot_analysis(); self.settle()
+            self.choose_region()
+            dialog = next(widget for widget in self.root.winfo_children() if isinstance(widget, CropDialog))
+            self.assertIn('灰色遮挡', dialog.info.get())
+            ocr.assert_not_called(); model.assert_not_called()
+            self.assertIsNone(self.app.shot_reader)
+            dialog.begin(SimpleNamespace(x=100, y=80)); dialog.drag(SimpleNamespace(x=300, y=220))
+            dialog.confirm(); self.settle()
+        ocr.assert_called_once(); model.assert_called_once()
 
 
 if __name__ == '__main__':

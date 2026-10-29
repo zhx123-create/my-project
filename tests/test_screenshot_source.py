@@ -9,9 +9,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from PIL import Image
+from PIL import Image, PngImagePlugin
 from desktop_screenshots import ScreenshotBinding, ScreenshotReader
-from visible_capture import VisibleCaptureError, VisibleWindowsAPI, capture_visible, capture_visible_isolated
+from visible_capture import VisibleCaptureError, VisibleWindowsAPI, _cli, capture_visible, capture_visible_isolated
 from windows_capture import CaptureError, Window
 from windows_ocr import OCR_HEADER, recognize_image
 
@@ -114,6 +114,73 @@ class VisibleRegionTests(unittest.TestCase):
         capture_visible(selected, self.region, (400, 300), self.api, grab)
         self.assertEqual(self.api.describe.call_count, 2)
         grab.assert_called_once_with(bbox=(120, 240, 320, 380), all_screens=True)
+
+    def test_preview_masks_input_toolbar_outside_message_region_before_return(self):
+        self.api.covering_rectangles = Mock(return_value=[(350, 450, 490, 490)])
+        self.api.uncovered.side_effect = VisibleCaptureError('covered')
+        original = picture((400, 300))
+        result = capture_visible(self.window, api=self.api, grab=Mock(return_value=original), preview=True)
+        self.assertEqual(result.info['capture_blocks'], [(250, 250, 390, 290)])
+        self.assertEqual(result.getpixel((300, 270)), (218, 222, 230))
+        self.assertEqual(result.getpixel((10, 10)), (0, 0, 0))
+        self.assertEqual(original.getpixel((300, 270)), (255, 255, 255), 'mask a copy without modifying the source')
+        self.api.uncovered.assert_not_called()
+        self.assertEqual(self.api.covering_rectangles.call_count, 2)
+
+    def test_preview_masks_both_positions_of_a_moving_overlay(self):
+        self.api.covering_rectangles = Mock(side_effect=[[(100, 400, 200, 500)], [(400, 400, 500, 500)]])
+        result = capture_visible(self.window, api=self.api, grab=Mock(return_value=picture((400, 300))), preview=True)
+        self.assertEqual(result.info['capture_blocks'], [(0, 200, 100, 300), (300, 200, 400, 300)])
+        for point in ((50, 250), (350, 250)):
+            self.assertEqual(result.getpixel(point), (218, 222, 230))
+
+    def test_fully_covered_preview_is_rejected(self):
+        self.api.covering_rectangles = Mock(return_value=[(100, 200, 500, 500)])
+        with self.assertRaisesRegex(CaptureError, '遮挡'):
+            capture_visible(self.window, api=self.api, grab=Mock(return_value=picture((400, 300))), preview=True)
+
+    def test_zero_alpha_layer_is_ignored_but_visible_layer_still_blocks(self):
+        from ctypes import wintypes as w
+        api = object.__new__(VisibleWindowsAPI)
+        api.user = SimpleNamespace(GetTopWindow=Mock(return_value=9), GetWindow=Mock(return_value=123), IsWindowVisible=Mock(return_value=True), IsIconic=Mock(return_value=False))
+        api.bounds = Mock(return_value=(0, 0, 1000, 800))
+        api._window_style = Mock(return_value=0x80000)
+        opacity = [0]
+        def attributes(handle, color, alpha, flags):
+            ctypes.cast(alpha, ctypes.POINTER(w.BYTE)).contents.value = opacity[0]
+            ctypes.cast(flags, ctypes.POINTER(w.DWORD)).contents.value = 2
+            return True
+        api._layered_attributes = attributes
+        api.uncovered(123, (100, 100, 200, 200))
+        api.bounds.assert_not_called()
+        opacity[0] = 128
+        with self.assertRaisesRegex(CaptureError, '遮挡'):
+            api.uncovered(123, (100, 100, 200, 200))
+
+    def test_masked_preview_scope_survives_child_png_protocol(self):
+        preview = picture((400, 300)); preview.info['capture_blocks'] = [(250, 250, 390, 290)]
+        output = io.BytesIO()
+        with patch('visible_capture.capture_visible', return_value=preview) as capture, patch('visible_capture.sys.stdout', SimpleNamespace(buffer=output)):
+            self.assertEqual(_cli(['--preview-selected', '123', '456']), 0)
+        self.assertTrue(capture.call_args.args[0].user_selected)
+        self.assertTrue(capture.call_args.kwargs['preview'])
+        response = SimpleNamespace(returncode=0, stdout=output.getvalue(), stderr=b'')
+        with patch('visible_capture.subprocess.run', return_value=response) as run:
+            result = capture_visible_isolated(Window(123, 456, '聊天', True), preview=True)
+        self.assertIn('--preview-selected', run.call_args.args[0])
+        self.assertEqual(result.info['capture_blocks'], [[250, 250, 390, 290]])
+
+    def test_preview_without_valid_scope_metadata_is_not_accepted(self):
+        for blocks in (None, '[[-1,0,20,20]]', '[[0,0,900,900]]', 'private non-json metadata'):
+            stream = io.BytesIO(); metadata = PngImagePlugin.PngInfo()
+            if blocks is not None:
+                metadata.add_text('capture_blocks', blocks)
+            picture().save(stream, format='PNG', pnginfo=metadata)
+            response = SimpleNamespace(returncode=0, stdout=stream.getvalue(), stderr=b'')
+            with self.subTest(blocks=blocks), patch('visible_capture.subprocess.run', return_value=response):
+                with self.assertRaises(CaptureError) as raised:
+                    capture_visible_isolated(self.window, preview=True)
+            self.assertNotIn('private', str(raised.exception))
 
     def test_isolated_capture_passes_only_numeric_scope_and_bounds_time(self):
         stream = io.BytesIO(); picture().save(stream, format='PNG')

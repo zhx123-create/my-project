@@ -749,7 +749,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
 
     def show_region_crop(self, image, accept_region, on_cancel):
         try:
-            dialog = CropDialog(self.root, image, lambda _image: None, region_accept=accept_region, on_cancel=on_cancel, instructions="只框选消息区，排除联系人列表和输入框。只需绑定一次；自动截图时请将微信与助手并排放置，保持选区无遮挡。")
+            dialog = CropDialog(self.root, image, lambda _image: None, region_accept=accept_region, on_cancel=on_cancel, instructions="只框选清楚可见的消息区，排除输入框和灰色区域（输入法浮条等遮挡部分已标灰）。绑定后仅检查消息选区，不要求窗口其他地方无遮挡。")
             dialog.use.configure(text="绑定并开始分析")
         except Exception:
             self.stop_watch("选区预览未能打开")
