@@ -51,7 +51,7 @@ class VisibleWindowsAPI(WindowsAPI):
         self._cloaked = None
         try:
             function = ctypes.WinDLL("dwmapi").DwmGetWindowAttribute
-            function.argtypes = [w.HWND, w.DWORD, ctypes.POINTER(w.DWORD), w.DWORD]
+            function.argtypes = [w.HWND, w.DWORD, ctypes.c_void_p, w.DWORD]
             function.restype = w.LONG
             self._cloaked = function
         except (OSError, AttributeError):
@@ -68,6 +68,13 @@ class VisibleWindowsAPI(WindowsAPI):
     def bounds(self, handle):
         from ctypes import wintypes as w
         rect = w.RECT()
+        # GetWindowRect includes invisible resize borders. On a maximized
+        # window those can extend beyond the monitor despite visible content
+        # being entirely onscreen. DWM reports the actual frame in pixels.
+        function = getattr(self, "_cloaked", None)
+        if function is not None:
+            if function(handle, 9, ctypes.byref(rect), ctypes.sizeof(rect)) == 0 and rect.right > rect.left and rect.bottom > rect.top:
+                return rect.left, rect.top, rect.right, rect.bottom
         if not self.user.GetWindowRect(handle, ctypes.byref(rect)):
             raise VisibleCaptureError("changed")
         return rect.left, rect.top, rect.right, rect.bottom
@@ -94,7 +101,7 @@ class VisibleWindowsAPI(WindowsAPI):
 def activate_window(window):
     """Only on an explicit bind click, ask Windows to foreground this window."""
     api = VisibleWindowsAPI()
-    current = api.identify(window.handle)
+    current = api.describe(window.handle) if getattr(window, "user_selected", False) else api.identify(window.handle)
     if current is None or current.pid != window.pid:
         raise VisibleCaptureError("changed")
     api.user.SetForegroundWindow(window.handle)
@@ -102,7 +109,8 @@ def activate_window(window):
 
 def capture_visible(window, region=None, expected_size=None, api=None, grab=None):
     api = api or VisibleWindowsAPI()
-    current = api.identify(window.handle)
+    identify = api.describe if getattr(window, "user_selected", False) else api.identify
+    current = identify(window.handle)
     if current is None or current.pid != window.pid:
         raise VisibleCaptureError("changed")
     if api.user.IsIconic(window.handle):
@@ -123,7 +131,7 @@ def capture_visible(window, region=None, expected_size=None, api=None, grab=None
         image = (grab or ImageGrab.grab)(bbox=box, all_screens=True)
     except Exception:
         raise VisibleCaptureError("failed") from None
-    actual = api.identify(window.handle)
+    actual = identify(window.handle)
     if actual is None or actual.pid != window.pid or api.bounds(window.handle) != bounds:
         raise VisibleCaptureError("changed")
     api.uncovered(window.handle, box)
@@ -136,7 +144,8 @@ def capture_visible(window, region=None, expected_size=None, api=None, grab=None
 
 
 def capture_visible_isolated(window, region=None, expected_size=None, timeout=8):
-    command = [sys.executable, str(Path(__file__).resolve()), "--visible", str(window.handle), str(window.pid)]
+    mode = "--visible-selected" if getattr(window, "user_selected", False) else "--visible"
+    command = [sys.executable, str(Path(__file__).resolve()), mode, str(window.handle), str(window.pid)]
     if region is not None:
         if expected_size is None or len(region) != 4 or len(expected_size) != 2 or any(type(value) is not int for value in (*region, *expected_size)):
             raise VisibleCaptureError("region")
@@ -166,13 +175,13 @@ def capture_visible_isolated(window, region=None, expected_size=None, timeout=8)
 
 def _cli(args):
     try:
-        if len(args) not in (3, 9) or args[0] != "--visible":
+        if len(args) not in (3, 9) or args[0] not in ("--visible", "--visible-selected"):
             raise ValueError("invalid protocol")
         numbers = [int(value) for value in args[1:]]
         if min(numbers[:2]) <= 0:
             raise ValueError("invalid identity")
         region, size = (tuple(numbers[2:6]), tuple(numbers[6:8])) if len(args) == 9 else (None, None)
-        image = capture_visible(Window(numbers[0], numbers[1], ""), region, size)
+        image = capture_visible(Window(numbers[0], numbers[1], "", args[0] == "--visible-selected"), region, size)
         image.save(sys.stdout.buffer, format="PNG")
         return 0
     except VisibleCaptureError as error:

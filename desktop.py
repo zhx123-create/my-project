@@ -194,6 +194,7 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         self.auto_copy = tk.BooleanVar(value=preferences["auto_copy"])
         self.active_operation = None
         self._busy_source_token = None
+        self._busy_watch_token = None
         self.job_started = None
         self._generation_transcribe_images = False
         self.last_reader_text = None
@@ -293,8 +294,12 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         self.refresh_style_summary()
 
     def show_reply_style(self):
-        if self.busy:
+        if self.busy and self.active_operation != "watch_read":
             return
+        if self.watch.active or self.active_operation == "watch_read":
+            self.stop_watch("正在调整回复风格")
+            if self.active_operation == "watch_read":
+                self.set_busy(False)
         if self.style_dialog is not None and self.style_dialog.winfo_exists():
             self.style_dialog.lift(); return
         dialog = tk.Toplevel(self.root)
@@ -308,31 +313,46 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         for row, (label, variable, values) in enumerate((("我的表达倾向", expression, STYLE_EXPRESSIONS), ("性格表达", personality, STYLE_PERSONALITIES)), 1):
             ttk.Label(panel, text=label).grid(row=row, column=0, sticky="w", pady=6)
             ttk.Combobox(panel, textvariable=variable, values=values, width=30, state="readonly").grid(row=row, column=1, sticky="ew", padx=(12, 0))
+        tone = tk.StringVar(dialog, value=self.tone.get())
+        ttk.Label(panel, text="基础语气").grid(row=3, column=0, sticky="w", pady=6)
+        ttk.Combobox(panel, textvariable=tone, values=list(TONES), width=30, state="readonly").grid(row=3, column=1, sticky="ew", padx=(12, 0))
         levels = {}
-        for row, (key, label) in enumerate((("humor", "幽默程度"), ("meme_level", "玩梗频率"), ("abstraction", "抽象程度")), 3):
+        for row, (key, label) in enumerate((("humor", "幽默程度"), ("meme_level", "玩梗频率"), ("abstraction", "抽象程度")), 4):
             ttk.Label(panel, text=label).grid(row=row, column=0, sticky="w", pady=6)
             levels[key] = tk.StringVar(dialog, value=STYLE_LEVEL_LABELS[key][self.style[key]])
             ttk.Combobox(panel, textvariable=levels[key], values=STYLE_LEVEL_LABELS[key], width=30, state="readonly").grid(row=row, column=1, sticky="ew", padx=(12, 0))
-        presets = ttk.Frame(panel); presets.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(12, 6))
+        presets = ttk.Frame(panel); presets.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(12, 6))
         def preset(personality_value, humor, memes, abstraction):
             personality.set(personality_value)
             for key, value in zip(("humor", "meme_level", "abstraction"), (humor, memes, abstraction)):
                 levels[key].set(STYLE_LEVEL_LABELS[key][value])
         for label, values in (("稳妥日常", ("自然", 1, 0, 0)), ("轻松有梗", ("活泼外向", 2, 2, 1)), ("抽象搞怪", ("俏皮毒舌", 3, 3, 3))):
             ttk.Button(presets, text=label, command=lambda choice=values: preset(*choice)).pack(side="left", padx=(0, 6))
-        ttk.Label(panel, text="表达倾向不代表实际性别，性格单独选择。严肃或难过的聊天会适当收敛玩梗。\n表情包只推荐候选，你看图、保存，再自行发到微信。", wraplength=510, foreground="#6b786d").grid(row=7, column=0, columnspan=2, sticky="w", pady=8)
-        actions = ttk.Frame(panel); actions.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        def save():
+        ttk.Label(panel, text="表达倾向不代表实际性别，性格单独选择。严肃或难过的聊天会适当收敛玩梗。\n表情包只推荐候选，你看图、保存，再自行发到微信。", wraplength=510, foreground="#6b786d").grid(row=8, column=0, columnspan=2, sticky="w", pady=8)
+        actions = ttk.Frame(panel); actions.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        def save(rewrite=False):
             choice = {"expression": expression.get(), "personality": personality.get(), **{key: STYLE_LEVEL_LABELS[key].index(variable.get()) for key, variable in levels.items()}}
             try:
                 self.set_reply_style(choice)
             except (ValueError, OSError) as error:
                 messagebox.showwarning("风格未保存", str(error), parent=dialog); return
+            self.tone.set(tone.get())
             self.status.set("表达风格已更新，下次生成时生效。命名会话各自记住自己的组合。")
             dialog.destroy()
+            if rewrite:
+                self.regenerate_reply()
+        ttk.Button(actions, text="应用并重新生成", command=lambda: save(True), style="Accent.TButton").pack(side="right", padx=(8, 0))
         ttk.Button(actions, text="应用风格", command=save).pack(side="right")
         ttk.Button(actions, text="取消", command=dialog.destroy).pack(side="right", padx=8)
         dialog.grab_set(); dialog.lift()
+
+    def regenerate_reply(self):
+        if self.busy:
+            return
+        if self.watch.active:
+            self.stop_watch("正在重新生成回复")
+        self.consent.set(True)
+        self.request_generation(preserve_results=True)
 
     def update_meme_suggestions(self, result):
         self.meme_hint = result.get("meme_hint", "") if isinstance(result, dict) else ""
@@ -809,14 +829,15 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         self.busy = busy
         self.active_operation = operation if busy else None
         self._busy_source_token = self._discovery_token if busy else None
+        self._busy_watch_token = self.watch.generation if busy and operation == "watch_read" else None
         for widget, normal in self.controls:
-            keep_editable = operation == "watch_read" and widget in (*self.reply_texts, *self.reply_action_buttons)
+            keep_editable = operation == "watch_read" and widget in (*self.reply_texts, *self.reply_action_buttons, *self.style_buttons)
             widget.configure(state="disabled" if busy and not keep_editable else normal)
         self.generate_button.configure(text="正在生成…" if busy and operation == "generate" else "用编辑内容生成")
         self.capture_button.configure(text="正在采集，请稍候…" if busy and operation == "capture" else "采集选中窗口")
         self.analyze_button.configure(text="正在读取…" if busy and operation in ("read", "watch_read", "ocr", "bind_region") else self.primary_action_label())
 
-    def request_generation(self):
+    def request_generation(self, preserve_results=False):
         if self.busy:
             return
         if not self.consent.get():
@@ -855,7 +876,8 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         watch_text = self._next_generation_watch_text
         self._next_generation_watch_token = None
         self._next_generation_watch_text = ""
-        self.clear_results()
+        if not preserve_results:
+            self.clear_results()
         self._generation_transcribe_images = transcribe_images
         self.set_busy(True)
         self.job_started = time.monotonic()
@@ -880,7 +902,10 @@ class DesktopApp(ScreenshotMixin, AutomationMixin):
         self.poll_screenshots()
         try:
             success, value = self.reader_events.get_nowait()
-            self.set_busy(False)
+            watch_token = value.get("__watch_token") if isinstance(value, dict) else None
+            stale_read = watch_token is not None and (not self.watch.active or watch_token != self.watch.generation)
+            if not stale_read or self.active_operation == "watch_read" and self._busy_watch_token == watch_token:
+                self.set_busy(False)
             if self.consume_watch_read(success, value):
                 pass
             elif success:

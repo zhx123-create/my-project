@@ -97,6 +97,7 @@ def build_desktop_ui(app):
     apply_theme(app.root)
     root = app.root
 
+    app.style_buttons = []
     def button(parent, label, command, *, style="TButton", side="left", **packing):
         widget = ttk.Button(parent, text=label, command=command, style=style)
         widget.pack(side=side, **packing)
@@ -111,7 +112,7 @@ def build_desktop_ui(app):
     ttk.Label(tagline, text="让每句话，都更像你", style="Caption.TLabel").pack(anchor="w")
     ttk.Label(tagline, text="你的微信聊天搭子", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
     button(header, "AI 设置", app.show_settings, side="right", padx=(8, 0))
-    button(header, "表达风格", app.show_reply_style, side="right", style="Soft.TButton")
+    app.style_buttons.append(button(header, "表达风格", app.show_reply_style, side="right", style="Soft.TButton"))
 
     profile_card, profile = _card(page, padding=(12, 9))
     profile_card.grid(row=1, column=0, sticky="ew", pady=(0, 14))
@@ -176,7 +177,7 @@ def build_desktop_ui(app):
     short_style = tk.StringVar(root, value=app.style_summary.get().split("\n", 1)[0])
     app.style_summary.trace_add("write", lambda *_args: short_style.set(app.style_summary.get().split("\n", 1)[0]))
     ttk.Label(preference, textvariable=short_style, style="Muted.Card.TLabel", wraplength=260).pack(side="left", fill="x", expand=True)
-    button(preference, "调整", app.show_reply_style, style="Quiet.TButton", side="right")
+    app.style_buttons.append(button(preference, "调整", app.show_reply_style, style="Quiet.TButton", side="right"))
     app.confirm_box = ttk.Checkbutton(left_body, text="允许此会话的上下文提交给 AI", variable=app.consent, style="Card.TCheckbutton")
     ttk.Label(left_body, text="分析时会将此会话内容提交给 AI。", style="Muted.Card.TLabel", wraplength=345).grid(row=2, column=0, sticky="w", pady=(10, 0))
     app.controls.append((app.confirm_box, "normal"))
@@ -211,6 +212,7 @@ def build_desktop_ui(app):
     app.window_box.pack(side="left", fill="x", expand=True); app.controls.append((app.window_box, "readonly"))
     app.window_box.bind("<<ComboboxSelected>>", lambda _event: app.capture_status.set("已选择微信窗口；请打开要分析的聊天。"))
     button(source, "查找微信", app.refresh_windows, style="Quiet.TButton", side="right", padx=(5, 0))
+    button(source, "手动绑定", app.offer_manual_window_binding, style="Quiet.TButton", side="right", padx=(5, 0))
     capture_tools = ttk.Frame(tools, style="Card.TFrame"); capture_tools.grid(row=2, column=0, sticky="ew", pady=(7, 0))
     app.capture_button = button(capture_tools, "采集选中窗口", app.capture, style="Soft.TButton", fill="x", expand=True)
     app.screen_button = button(capture_tools, "系统截图", app.system_screenshot, style="Soft.TButton", padx=(5, 0), fill="x", expand=True)
@@ -244,7 +246,10 @@ def build_desktop_ui(app):
     button(file_tools, "打开截图文件", app.open_screenshot_file, style="Quiet.TButton")
 
     right.columnconfigure(0, weight=1)
-    ttk.Label(right, text="回复工作台", style="Title.Card.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 12))
+    workbench_heading = ttk.Frame(right, style="Card.TFrame")
+    workbench_heading.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+    ttk.Label(workbench_heading, text="回复工作台", style="Title.Card.TLabel").pack(side="left")
+    app.style_buttons.append(button(workbench_heading, "换风格重写", app.show_reply_style, style="Quiet.TButton", side="right"))
     insight = ttk.Frame(right, style="Card.TFrame"); insight.grid(row=1, column=0, sticky="ew", pady=(0, 10))
     ttk.Label(insight, text="AI 理解", style="Muted.Card.TLabel").pack(anchor="w", pady=(0, 5))
     app.understanding = _text(insight, height=2, background=COLORS["accent_light"], padding=9)

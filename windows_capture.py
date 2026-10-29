@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import io
 import json
 import ntpath
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -31,6 +32,7 @@ class Window:
     handle: int
     pid: int
     title: str
+    user_selected: bool = False
 
 
 class WindowsAPI:
@@ -49,6 +51,7 @@ class WindowsAPI:
             (self.user.GetWindowTextLengthW, [w.HWND], ctypes.c_int),
             (self.user.GetWindowTextW, [w.HWND, w.LPWSTR, ctypes.c_int], ctypes.c_int),
             (self.user.GetWindowThreadProcessId, [w.HWND, ctypes.POINTER(w.DWORD)], w.DWORD),
+            (self.user.GetForegroundWindow, [], w.HWND),
             (self.kernel.OpenProcess, [w.DWORD, w.BOOL, w.DWORD], w.HANDLE),
             (self.kernel.QueryFullProcessImageNameW, [w.HANDLE, w.DWORD, w.LPWSTR, ctypes.POINTER(w.DWORD)], w.BOOL),
             (self.kernel.CloseHandle, [w.HANDLE], w.BOOL),
@@ -56,13 +59,27 @@ class WindowsAPI:
         for function, args, result in signatures:
             function.argtypes, function.restype = args, result
 
-    def identify(self, handle):
+    def describe(self, handle, include_title=True):
+        """Read metadata for one explicitly targeted handle, without capturing."""
         from ctypes import wintypes as w
         if not self.user.IsWindow(handle) or not self.user.IsWindowVisible(handle):
             return None
         pid = w.DWORD()
         self.user.GetWindowThreadProcessId(handle, ctypes.byref(pid))
-        process = self.kernel.OpenProcess(0x1000, False, pid.value)
+        if not pid.value:
+            return None
+        if not include_title:
+            return Window(int(handle), pid.value, "")
+        title = ctypes.create_unicode_buffer(min(1000, self.user.GetWindowTextLengthW(handle)) + 1)
+        self.user.GetWindowTextW(handle, title, len(title))
+        return Window(int(handle), pid.value, title.value or "未命名窗口")
+
+    def identify(self, handle):
+        from ctypes import wintypes as w
+        window = self.describe(handle, include_title=False)
+        if window is None:
+            return None
+        process = self.kernel.OpenProcess(0x1000, False, window.pid)
         if not process:
             return None
         try:
@@ -71,9 +88,8 @@ class WindowsAPI:
                 return None
             if ntpath.basename(path.value).casefold() not in {"wechat.exe", "weixin.exe"}:
                 return None
-            title = ctypes.create_unicode_buffer(self.user.GetWindowTextLengthW(handle) + 1)
-            self.user.GetWindowTextW(handle, title, len(title))
-            return Window(int(handle), pid.value, title.value or "微信窗口")
+            current = self.describe(handle)
+            return current if current is not None and current.pid == window.pid else None
         finally:
             self.kernel.CloseHandle(process)
 
@@ -92,6 +108,26 @@ class WindowsAPI:
 
 def list_windows(api=None):
     return (api or WindowsAPI()).windows()
+
+
+def pick_foreground_window(api=None):
+    """Only after an explicit countdown, bind exactly the clicked window."""
+    api = api or WindowsAPI()
+    handle = api.user.GetForegroundWindow()
+    window = api.describe(handle) if handle else None
+    if window is None or window.pid == os.getpid():
+        raise CaptureError("尚未选中聊天窗口。请重新开始，并在倒计时内点击微信的聊天窗口。")
+    return Window(window.handle, window.pid, window.title, True)
+
+
+def selected_window_state(window, api=None):
+    """Recheck a user-picked handle; never enumerate or select another app."""
+    if getattr(window, "user_selected", False) is not True:
+        raise CaptureError("此窗口尚未经过手动选择。")
+    current = (api or WindowsAPI()).describe(window.handle)
+    if current is None or current.pid != window.pid:
+        return None
+    return Window(current.handle, current.pid, current.title, True)
 
 
 def capture_window(window, api=None, grab=None):

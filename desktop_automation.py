@@ -5,12 +5,12 @@ import time
 import tkinter as tk
 from tkinter import simpledialog, ttk
 
-from windows_capture import CaptureError, list_windows
+from windows_capture import CaptureError, list_windows, selected_window_state
 from wechat_reader import read_conversation
 
 
 class AutomationMixin:
-    def quick_analyze(self):
+    def quick_analyze(self, refresh_windows=False):
         if self.busy:
             return
         if not self.active_profile:
@@ -25,14 +25,14 @@ class AutomationMixin:
                 self.stop_watch("尚未选择会话")
                 return
         if not self.key.get().strip():
-            self.resume_action = self.quick_analyze
+            self.resume_action = lambda: self.quick_analyze(refresh_windows=refresh_windows)
             self.show_settings()
             return
         # Clicking the named read-and-generate action explicitly submits this
         # selected conversation; permission is not inferred from a clipboard.
         self.consent.set(True)
         index = self.window_box.current()
-        if 0 <= index < len(self.windows):
+        if not refresh_windows and 0 <= index < len(self.windows):
             if self.screenshot_mode() and (self.shot_reader is None or not self.shot_reader.matches(self.active_profile, self.windows[index])):
                 self.bind_chat_region(self.windows[index])
                 return
@@ -46,7 +46,7 @@ class AutomationMixin:
                 self.analyze_current_chat()
             return
         self.set_busy(True, operation="discover")
-        self.status.set("正在查找微信窗口…找到后会读取当前聊天并生成草稿。")
+        self.status.set("正在刷新微信窗口列表；单独拉出的聊天窗口也会重新查找。")
         token, events = self._discovery_token, self.discovery_events
         def discover():
             try:
@@ -70,6 +70,8 @@ class AutomationMixin:
         if not success or not value:
             self.stop_watch("没有可用的微信窗口")
             self.status.set(value if not success else "没有找到微信。打开并登录微信后，再点一键分析。")
+            if self.screenshot_mode():
+                self.offer_manual_window_binding()
             return
         self.windows = value
         self.window_box.configure(values=[f"{index + 1}. {window.title}" for index, window in enumerate(value)])
@@ -81,7 +83,7 @@ class AutomationMixin:
         dialog = tk.Toplevel(self.root)
         dialog.title("选择微信窗口"); dialog.transient(self.root)
         panel = ttk.Frame(dialog, padding=20); panel.pack(fill="both", expand=True)
-        ttk.Label(panel, text="只读取你选中的这个窗口。请先打开允许分析的聊天。", wraplength=420).pack(anchor="w", pady=(0, 12))
+        ttk.Label(panel, text="请选择刚刚单独打开的聊天窗口。只读取你选中的窗口，确认后再框选消息区。", wraplength=420).pack(anchor="w", pady=(0, 12))
         choice = ttk.Combobox(panel, values=[f"{index + 1}. {window.title}" for index, window in enumerate(value)], state="readonly", width=45)
         choice.pack(fill="x"); choice.current(0)
         def use():
@@ -102,7 +104,7 @@ class AutomationMixin:
         self._watch_start_requested = True
         self.watch_button.configure(text="取消开启", style="Soft.TButton")
         self.watch_status.set("正在准备自动辅助…")
-        self.quick_analyze()
+        self.quick_analyze(refresh_windows=self.screenshot_mode() and self.shot_reader is None)
 
     def _begin_watch(self, window):
         self.watch.interval = self.watch_interval.get()
@@ -135,7 +137,7 @@ class AutomationMixin:
         events = self.reader_events
         def read():
             try:
-                current = next((candidate for candidate in list_windows() if candidate.handle == window.handle and candidate.pid == window.pid), None)
+                current = selected_window_state(window) if getattr(window, "user_selected", False) else next((candidate for candidate in list_windows() if candidate.handle == window.handle and candidate.pid == window.pid), None)
                 if current is None or current.title != window.title:
                     raise CaptureError("微信窗口已关闭或标题发生变化，请核对聊天后重新开启自动辅助。")
                 snapshot = shot_reader.read(window) if shot_reader is not None else read_conversation(window)

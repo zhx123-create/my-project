@@ -4,11 +4,12 @@ import hashlib
 import queue
 import threading
 import time
-from tkinter import filedialog, messagebox
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageGrab
 from visible_capture import activate_window, capture_visible_isolated
-from windows_capture import CaptureError, Window, list_windows
+from windows_capture import CaptureError, Window, list_windows, pick_foreground_window, selected_window_state
 from windows_ocr import recognize_image
 
 TEXT_SOURCE = "窗口文字"
@@ -38,7 +39,7 @@ class ScreenshotReader:
         if not self.matches(self.binding.profile, window):
             raise CaptureError("截图绑定窗口已变化，请重新框选聊天区域。")
         image = capture_visible_isolated(window, self.binding.region, self.binding.size)
-        current = next((item for item in list_windows() if item.handle == window.handle and item.pid == window.pid), None)
+        current = selected_window_state(window) if getattr(window, "user_selected", False) else next((item for item in list_windows() if item.handle == window.handle and item.pid == window.pid), None)
         if current is None or not self.matches(self.binding.profile, current):
             raise CaptureError("聊天窗口已变化，本次截图未提交给 AI。请重新绑定。")
         return self.image_to_snapshot(image)
@@ -52,6 +53,51 @@ class ScreenshotReader:
 
 
 class ScreenshotMixin:
+    def offer_manual_window_binding(self):
+        if self.busy:
+            return
+        existing = getattr(self, "window_picker_dialog", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift(); return
+        self.stop_watch("正在手动选择聊天窗口")
+        dialog = tk.Toplevel(self.root)
+        self.window_picker_dialog = dialog
+        dialog.title("手动绑定聊天窗口"); dialog.transient(self.root)
+        panel = ttk.Frame(dialog, padding=20); panel.pack(fill="both", expand=True)
+        ttk.Label(panel, text="自动找不到微信时，可以直接点选聊天窗口。\n\n点“开始选择”后，助手会缩小。请在 3 秒内点击你单独打开的微信聊天窗口，保持它在最前面。之后会预览这个窗口，只需框选消息区。\n\n程序不会自动验证它是否属于微信，请核对预览；选区确认前不会提交给 AI。", wraplength=440).pack(anchor="w", pady=(0, 14))
+        def start():
+            token = self._discovery_token
+            dialog.destroy()
+            self.status.set("请在 3 秒内点击微信聊天窗口，让它保持在最前面。")
+            self.set_busy(True, operation="pick_window")
+            self.root.iconify()
+            def finish():
+                try:
+                    window = pick_foreground_window()
+                except CaptureError as error:
+                    window, error_text = None, str(error)
+                except Exception:
+                    window, error_text = None, "未能取得你选择的窗口，请重新开始并点击聊天窗口。"
+                self.root.deiconify()
+                if token != self._discovery_token:
+                    if self.active_operation == "pick_window" and self._busy_source_token == token:
+                        self.set_busy(False)
+                    return
+                self.set_busy(False)
+                if window is None:
+                    self.status.set(error_text); return
+                self.windows = [window]
+                self.window_box.configure(values=["手动选择：" + window.title]); self.window_box.current(0)
+                self.shot_reader = None
+                self.shot_readers.pop(self.active_profile, None)
+                self.capture_source.set(SCREENSHOT_SOURCE)
+                self.capture_status.set("已选定一个窗口。请核对预览确实是允许分析的聊天，再框选消息区。")
+                self.quick_analyze()
+            self.root.after(3000, finish)
+        ttk.Button(panel, text="开始选择（3 秒）", command=start, style="Accent.TButton").pack(side="right")
+        ttk.Button(panel, text="取消", command=dialog.destroy).pack(side="right", padx=8)
+        dialog.grab_set(); dialog.lift()
+
     def screenshot_mode(self):
         return self.capture_source.get() == SCREENSHOT_SOURCE
 
@@ -82,7 +128,7 @@ class ScreenshotMixin:
         if self.busy:
             return
         self.capture_source.set(SCREENSHOT_SOURCE)
-        self.quick_analyze()
+        self.quick_analyze(refresh_windows=True)
 
     def rebind_screenshot(self):
         if self.busy:

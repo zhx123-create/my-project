@@ -34,6 +34,8 @@ class ScreenshotFlowTests(unittest.TestCase):
         self.app = DesktopApp(self.root, memory=ConversationMemory(), meme_library=MemeLibrary(Path(self.folder.name) / 'memes'), settings=DesktopSettings())
         self.app.select_profile('朋友'); self.app.key.set('test-only-key')
         self.window = Window(123, 456, '微信聊天')
+        discovery = patch('desktop_automation.list_windows', return_value=[self.window])
+        discovery.start(); self.addCleanup(discovery.stop)
         self.app.windows = [self.window]; self.app.window_box.configure(values=['微信聊天']); self.app.window_box.current(0)
         self.image = Image.new('RGB', (400, 300), 'white'); self.image.putpixel((50, 50), (0, 0, 0))
         self.result = {'understanding': '正在确认时间。', 'replies': [{'label': '自然', 'text': '我确认一下安排。'}]}
@@ -231,6 +233,58 @@ class ScreenshotFlowTests(unittest.TestCase):
                     self.app.poll_screenshots()
                 self.assertFalse(self.app.busy)
                 self.assertNotIn('disabled', self.app.generate_button.state())
+
+    def test_new_detached_window_is_discovered_instead_of_reusing_cached_main_window(self):
+        detached = Window(789, 999, '单独聊天：朋友')
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+        with patch('desktop_automation.list_windows', return_value=[self.window, detached]) as discover, patch('desktop_screenshots.activate_window') as activate, patch('desktop_screenshots.capture_visible_isolated', return_value=self.image) as capture, patch('desktop_screenshots.recognize_image', return_value=ocr_text('未知：周五几点见？')), patch('desktop.generate', return_value=self.result):
+            self.app.start_screenshot_analysis(); self.settle()
+            discover.assert_called_once(); capture.assert_not_called()
+            chooser = next(widget for widget in self.root.winfo_children() if isinstance(widget, tk.Toplevel))
+            items = list(descendants(chooser))
+            box = next(widget for widget in items if widget.winfo_class() == 'TCombobox')
+            box.current(1)
+            next(widget for widget in items if widget.winfo_class() == 'TButton' and widget.cget('text') == '使用这个窗口').invoke()
+            self.settle(); self.choose_region(); self.settle()
+        activate.assert_called_once_with(detached)
+        capture.assert_called_once_with(detached)
+        self.assertEqual(self.app.shot_reader.binding.window, detached)
+
+    def test_missing_wechat_discovery_can_bind_clicked_window_and_watch_it(self):
+        selected = Window(789, 999, '手动选定的聊天', True)
+        scheduled = []
+        original_after = self.root.after
+        def schedule(delay, callback=None, *args):
+            if delay == 3000:
+                scheduled.append(callback); return 'test-countdown'
+            return original_after(delay, callback, *args)
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+        with patch('desktop_automation.list_windows', return_value=[]) as discover, patch('desktop_screenshots.pick_foreground_window', return_value=selected) as pick, patch('desktop_screenshots.activate_window'), patch('desktop_screenshots.capture_visible_isolated', return_value=self.image) as capture, patch('desktop_screenshots.recognize_image', return_value=ocr_text('未知：周五几点见？')), patch('desktop.generate', return_value=self.result) as model, patch.object(self.root, 'iconify'), patch.object(self.root, 'deiconify'):
+            self.app.start_screenshot_analysis(); self.settle()
+            picker = self.app.window_picker_dialog
+            pick.assert_not_called(); capture.assert_not_called(); model.assert_not_called()
+            start = next(widget for widget in descendants(picker) if widget.winfo_class() == 'TButton' and widget.cget('text') == '开始选择（3 秒）')
+            with patch.object(self.root, 'after', side_effect=schedule):
+                start.invoke()
+            self.assertTrue(self.app.busy); pick.assert_not_called()
+            self.assertEqual(len(scheduled), 1)
+            scheduled.pop()(); self.settle()
+            self.assertEqual(self.app.windows, [selected])
+            capture.assert_called_once_with(selected); model.assert_not_called()
+            self.choose_region(); self.settle()
+            model.assert_called_once()
+            crop = self.image.crop(self.app.shot_reader.binding.region)
+            with patch('desktop_automation.selected_window_state', return_value=selected), patch('desktop_screenshots.selected_window_state', return_value=selected), patch('desktop_screenshots.capture_visible_isolated', return_value=crop):
+                self.app.toggle_watch(); self.settle()
+            self.assertTrue(self.app.watch.active)
+            self.assertTrue(self.app.watch.window.user_selected)
+            discover.assert_called_once()
 
 
 if __name__ == '__main__':

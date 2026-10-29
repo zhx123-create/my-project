@@ -355,6 +355,59 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(self.app.style, expected)
         self.assertEqual(self.app.memory.profile('朋友')['style'], expected)
 
+    def test_style_dialog_rewrites_current_context_without_recapturing_wechat(self):
+        self.app.select_profile('朋友'); self.app.key.set('test-only-key')
+        self.app.context.insert('1.0', '未知：周五下班一起吃火锅吗？')
+        self.app.reply_texts[0].insert('1.0', '原来的草稿')
+        self.app.show_reply_style(); self.root.update()
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+        widgets = list(descendants(self.app.style_dialog))
+        button = lambda text: next(widget for widget in widgets if widget.winfo_class() == 'TButton' and widget.cget('text') == text)
+        button('抽象搞怪').invoke()
+        tone = next(widget for widget in widgets if widget.winfo_class() == 'TCombobox' and '简洁' in widget.cget('values'))
+        tone.set('简洁')
+        result = {'understanding': '正在约饭。', 'replies': [{'label': '搞怪', 'text': '收到，火锅雷达已启动。'}]}
+        with patch('desktop.generate', return_value=result) as model, patch('desktop_screenshots.capture_visible_isolated') as capture, patch('desktop.read_conversation') as read:
+            button('应用并重新生成').invoke()
+            self.assertIn('原来的草稿', self.app.reply_texts[0].get('1.0', 'end-1c'), 'keep the current draft while requesting its replacement')
+            self.wait_for_job()
+        capture.assert_not_called(); read.assert_not_called(); model.assert_called_once()
+        data = json.loads(model.call_args.args[1][1]['content'][0]['text'])
+        self.assertEqual(data['风格维度']['personality'], '俏皮毒舌')
+        self.assertEqual(data['风格维度']['abstraction'], 3)
+        self.assertEqual(data['语气'], '简短直接')
+        self.assertIn('一起吃火锅', data['已记录的历史'])
+        self.assertNotIn('原来的草稿', data['已记录的历史'])
+        self.assertEqual(self.app.reply_texts[0].get('1.0', 'end-1c'), result['replies'][0]['text'])
+
+    def test_failed_style_rewrite_keeps_previous_draft(self):
+        self.app.key.set('test-only-key')
+        self.app.context.insert('1.0', '未知：周五下班一起吃火锅吗？')
+        self.app.reply_texts[0].insert('1.0', '请保留这条已编辑草稿')
+        with patch('desktop.generate', side_effect=ServiceError('临时请求失败')):
+            self.app.regenerate_reply(); self.wait_for_job()
+        self.assertEqual(self.app.reply_texts[0].get('1.0', 'end-1c'), '请保留这条已编辑草稿')
+        self.assertIn('临时请求失败', self.app.status.get())
+
+    def test_style_remains_available_during_watch_read_and_late_result_is_ignored(self):
+        window = Window(123, 456, '微信')
+        self.app.watch.start('朋友', window)
+        token = self.app.watch.generation
+        self.app.set_busy(True, operation='watch_read')
+        self.assertTrue(all('disabled' not in button.state() for button in self.app.style_buttons))
+        self.app.style_buttons[-1].invoke()
+        self.assertIsNotNone(self.app.style_dialog)
+        self.assertFalse(self.app.watch.active)
+        self.assertFalse(self.app.busy)
+        self.app.set_busy(True, operation='generate')
+        self.app.reader_events.put((False, {'__watch_token': token, 'error': '旧窗口读取失败'}))
+        self.app.poll()
+        self.assertTrue(self.app.busy, 'an abandoned window read must not unlock a newer rewrite request')
+        self.assertNotIn('旧窗口读取失败', self.app.status.get())
+
     def import_test_meme(self):
         path = Path(self.temp.name) / '抽象无语.png'
         Image.new('RGB', (60, 60), (60, 120, 180)).save(path)

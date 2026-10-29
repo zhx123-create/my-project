@@ -1,4 +1,5 @@
 import base64
+import ctypes
 import io
 import json
 from pathlib import Path
@@ -75,6 +76,45 @@ class VisibleRegionTests(unittest.TestCase):
         with self.assertRaisesRegex(CaptureError, '屏幕'):
             api.uncovered(123, (-10, 100, 200, 200))
 
+    def test_maximized_window_uses_visible_frame_not_offscreen_resize_borders(self):
+        from ctypes import wintypes as w
+        api = object.__new__(VisibleWindowsAPI)
+        def frame(handle, attribute, pointer, length):
+            self.assertEqual(attribute, 9)
+            rect = ctypes.cast(pointer, ctypes.POINTER(w.RECT)).contents
+            rect.left, rect.top, rect.right, rect.bottom = 0, 0, 1920, 1080
+            return 0
+        api._cloaked = frame
+        api.identify = Mock(return_value=self.window)
+        api.user = SimpleNamespace(IsIconic=Mock(return_value=False), GetWindowRect=Mock(), GetTopWindow=Mock(return_value=123), GetSystemMetrics=lambda index: {76: 0, 77: 0, 78: 1920, 79: 1080}[index])
+        grab = Mock(return_value=picture((1920, 1080)))
+        capture_visible(self.window, api=api, grab=grab)
+        grab.assert_called_once_with(bbox=(0, 0, 1920, 1080), all_screens=True)
+        api.user.GetWindowRect.assert_not_called()
+
+    def test_frame_query_failure_falls_back_to_window_rect(self):
+        from ctypes import wintypes as w
+        api = object.__new__(VisibleWindowsAPI)
+        api._cloaked = Mock(return_value=1)
+        def window_rect(handle, pointer):
+            rect = ctypes.cast(pointer, ctypes.POINTER(w.RECT)).contents
+            rect.left, rect.top, rect.right, rect.bottom = 100, 200, 500, 500
+            return True
+        api.user = SimpleNamespace(GetWindowRect=window_rect)
+        self.assertEqual(api.bounds(123), (100, 200, 500, 500))
+
+    def test_only_explicitly_selected_windows_can_use_generic_metadata_checks(self):
+        selected = Window(123, 456, '手动聊天', True)
+        self.api.describe = Mock(return_value=selected)
+        self.api.identify.return_value = None
+        grab = Mock(return_value=picture())
+        with self.assertRaises(CaptureError):
+            capture_visible(self.window, self.region, (400, 300), self.api, grab)
+        self.api.describe.assert_not_called(); grab.assert_not_called()
+        capture_visible(selected, self.region, (400, 300), self.api, grab)
+        self.assertEqual(self.api.describe.call_count, 2)
+        grab.assert_called_once_with(bbox=(120, 240, 320, 380), all_screens=True)
+
     def test_isolated_capture_passes_only_numeric_scope_and_bounds_time(self):
         stream = io.BytesIO(); picture().save(stream, format='PNG')
         response = SimpleNamespace(returncode=0, stdout=stream.getvalue(), stderr=b'')
@@ -83,6 +123,10 @@ class VisibleRegionTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][-8:], ['123', '456', '20', '40', '220', '180', '400', '300'])
         self.assertNotIn('聊天', run.call_args.args[0])
         self.assertEqual(run.call_args.kwargs['timeout'], 8)
+        with patch('visible_capture.subprocess.run', return_value=response) as selected_run:
+            capture_visible_isolated(Window(123, 456, '手动聊天', True), self.region, (400, 300))
+        self.assertIn('--visible-selected', selected_run.call_args.args[0])
+        self.assertNotIn('手动聊天', selected_run.call_args.args[0])
         with patch('visible_capture.subprocess.run', side_effect=subprocess.TimeoutExpired('secret', 8)):
             with self.assertRaisesRegex(CaptureError, '超时'):
                 capture_visible_isolated(self.window)

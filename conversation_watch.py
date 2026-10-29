@@ -22,6 +22,7 @@ class WindowBinding:
     handle: int
     pid: int
     title: str
+    user_selected: bool = False
 
 
 def normalize_snapshot(text):
@@ -50,7 +51,10 @@ def _binding(window):
         raise ValueError("请先选择有效的微信窗口。") from None
     if type(handle) is not int or type(pid) is not int or handle <= 0 or pid <= 0 or not isinstance(title, str) or len(title) > 1000:
         raise ValueError("请先选择有效的微信窗口。")
-    return WindowBinding(handle, pid, title)
+    selected = getattr(window, "user_selected", False)
+    if type(selected) is not bool:
+        raise ValueError("窗口选择来源无效。")
+    return WindowBinding(handle, pid, title, selected)
 
 
 def _fingerprint(text):
